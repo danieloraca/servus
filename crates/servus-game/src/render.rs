@@ -60,8 +60,13 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
     if let Some(report) = report {
         writeln!(
             output,
-            "Traffic: received={} | served={} | dropped={} | revenue={}",
-            report.received, report.served, report.dropped, report.revenue
+            "Traffic: received={} | served={} | dropped={} | revenue={} | outage_penalty={} | failover={}",
+            report.received,
+            report.served,
+            report.dropped,
+            report.revenue,
+            report.outage_penalty,
+            report.failover_active,
         )
         .expect("writing to a String cannot fail");
         write_completed_services(&mut output, report);
@@ -327,5 +332,6 @@ mod tests {
         let view = render_simulation(&simulation, Some(&report));
         assert!(view.contains("0 |G!.|"));
         assert!(view.contains("Cyberattack: service 2 disrupted for 2 ticks"));
+        assert!(view.contains("outage_penalty=25 | failover=false"));
     }
 }

@@ -33,6 +33,8 @@ struct ClientSimulation {
     paused: bool,
     total_served: u64,
     blocked_attacks: u64,
+    successful_failovers: u64,
+    outage_losses: u64,
 }
 
 #[derive(Component)]
@@ -140,6 +142,8 @@ pub fn run_bevy_client() {
             paused: false,
             total_served: 0,
             blocked_attacks: 0,
+            successful_failovers: 0,
+            outage_losses: 0,
         })
         .insert_resource(BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -201,13 +205,13 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
 
     commands.spawn((
         Text::new("Loading controls…"),
-        TextFont::from_font_size(14.0),
+        TextFont::from_font_size(13.0),
         TextColor(Color::srgb(0.84, 0.9, 0.96)),
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(22.0),
             top: Val::Px(22.0),
-            padding: UiRect::all(Val::Px(14.0)),
+            padding: UiRect::all(Val::Px(10.0)),
             width: Val::Px(310.0),
             ..default()
         },
@@ -470,6 +474,10 @@ fn advance_simulation(time: Res<Time>, mut client: ResMut<ClientSimulation>) {
         if report.cyberattack.is_some_and(|attack| attack.blocked) {
             client.blocked_attacks = client.blocked_attacks.saturating_add(1);
         }
+        if report.cyberattack.is_some() && report.failover_active {
+            client.successful_failovers = client.successful_failovers.saturating_add(1);
+        }
+        client.outage_losses = client.outage_losses.saturating_add(report.outage_penalty);
         client.last_report = Some(report);
     }
 }
@@ -961,6 +969,11 @@ fn take_attack_notification(
             "CYBERATTACK BLOCKED — {} protected",
             service_description(&client.simulation, attack.target)
         )
+    } else if report.failover_active {
+        format!(
+            "BREACH CONTAINED — failover served {} requests; loss {} credits",
+            report.served, report.outage_penalty
+        )
     } else {
         format!(
             "BREACH — {} disrupted for {} ticks",
@@ -999,6 +1012,8 @@ fn reset_scenario(
     client.paused = false;
     client.total_served = 0;
     client.blocked_attacks = 0;
+    client.successful_failovers = 0;
+    client.outage_losses = 0;
 
     tool.selected = ServiceKind::ApplicationServer;
     tool.hovered = None;
@@ -1088,7 +1103,7 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     let objectives = objectives_text(client);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -1096,6 +1111,8 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         dropped,
         client.total_served,
         client.blocked_attacks,
+        client.successful_failovers,
+        client.outage_losses,
         ticks_until_attack(simulation.tick().number()),
         tool.feedback,
     )
@@ -1424,6 +1441,8 @@ mod tests {
             paused: false,
             total_served,
             blocked_attacks: 0,
+            successful_failovers: 0,
+            outage_losses: 0,
         };
         let objectives = objective_statuses(&client);
         assert!(objectives[..5].iter().all(|objective| objective.complete));
@@ -1525,6 +1544,69 @@ mod tests {
     }
 
     #[test]
+    fn breach_notification_reports_partial_failover_and_financial_loss() {
+        let map = MapSize::new(4, 2).expect("test map is valid");
+        let mut simulation = Simulation::new(500, 150, map);
+        let gateway = build_service(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            GridPosition::new(0, 0),
+        )
+        .expect("gateway placement is valid");
+        let load_balancer = build_service(
+            &mut simulation,
+            ServiceKind::LoadBalancer,
+            GridPosition::new(1, 0),
+        )
+        .expect("load-balancer placement is valid");
+        let first_server = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(2, 0),
+        )
+        .expect("first server placement is valid");
+        let second_server = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(3, 0),
+        )
+        .expect("second server placement is valid");
+        for (from, to) in [
+            (gateway.id(), load_balancer.id()),
+            (load_balancer.id(), first_server.id()),
+            (load_balancer.id(), second_server.id()),
+        ] {
+            simulation
+                .apply(GameCommand::ConnectServices { from, to })
+                .expect("test connection is valid");
+        }
+        let mut report = simulation.advance();
+        while report.tick.number() < CYBER_ATTACK_INTERVAL {
+            report = simulation.advance();
+        }
+        assert!(report.failover_active);
+        assert_eq!(report.served, 100);
+        assert_eq!(report.outage_penalty, 50);
+
+        let client = ClientSimulation {
+            simulation,
+            last_report: Some(report),
+            tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            paused: false,
+            total_served: 0,
+            blocked_attacks: 0,
+            successful_failovers: 1,
+            outage_losses: 50,
+        };
+        let mut progress = GameProgress::new();
+        let notification =
+            take_attack_notification(&client, &mut progress).expect("the breach is announced once");
+        assert!(notification.contains("BREACH CONTAINED"));
+        assert!(notification.contains("served 100 requests"));
+        assert!(notification.contains("loss 50 credits"));
+    }
+
+    #[test]
     fn restart_restores_every_piece_of_scenario_state() {
         let scenario = create_demo_scenario().expect("demo scenario is valid");
         let inspected = scenario.simulation.services()[0].id();
@@ -1540,6 +1622,8 @@ mod tests {
             paused: true,
             total_served: 900,
             blocked_attacks: 3,
+            successful_failovers: 2,
+            outage_losses: 400,
         };
         let mut tool = BuildTool {
             selected: ServiceKind::InternetGateway,
@@ -1563,6 +1647,8 @@ mod tests {
         assert!(!client.paused);
         assert_eq!(client.total_served, 0);
         assert_eq!(client.blocked_attacks, 0);
+        assert_eq!(client.successful_failovers, 0);
+        assert_eq!(client.outage_losses, 0);
         assert_eq!(tool.selected, ServiceKind::ApplicationServer);
         assert!(!tool.connecting);
         assert_eq!(tool.connection_from, None);
@@ -1582,6 +1668,8 @@ mod tests {
             paused: false,
             total_served: 0,
             blocked_attacks: 0,
+            successful_failovers: 0,
+            outage_losses: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1611,6 +1699,8 @@ mod tests {
             paused: false,
             total_served: 0,
             blocked_attacks: 0,
+            successful_failovers: 0,
+            outage_losses: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1640,6 +1730,8 @@ mod tests {
             paused: false,
             total_served: 150,
             blocked_attacks: 0,
+            successful_failovers: 0,
+            outage_losses: 0,
         };
 
         let text = inspection_text(&client, inspected).expect("the inspected service exists");

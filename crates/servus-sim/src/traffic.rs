@@ -44,6 +44,8 @@ pub struct TickReport {
     pub served: u64,
     pub dropped: u64,
     pub revenue: u64,
+    pub outage_penalty: u64,
+    pub failover_active: bool,
     pub completed_services: Vec<ServiceId>,
     pub link_traffic: Vec<LinkTraffic>,
     pub cyberattack: Option<CyberAttackReport>,

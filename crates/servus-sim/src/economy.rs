@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+pub const OUTAGE_PENALTY_PER_DROPPED_REQUEST: u64 = 1;
+
 /// The spendable credits owned by a company.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Budget(u64);
@@ -29,6 +31,12 @@ impl Budget {
 
     pub(crate) fn credit(&mut self, amount: u64) {
         self.0 = self.0.saturating_add(amount);
+    }
+
+    pub(crate) fn forfeit_up_to(&mut self, amount: u64) -> u64 {
+        let forfeited = amount.min(self.0);
+        self.0 -= forfeited;
+        forfeited
     }
 }
 
@@ -79,6 +87,15 @@ mod tests {
         let mut budget = Budget::new(25);
         budget.credit(15);
         assert_eq!(budget.credits(), 40);
+    }
+
+    #[test]
+    fn outage_forfeiture_is_capped_at_available_credits() {
+        let mut budget = Budget::new(25);
+        assert_eq!(budget.forfeit_up_to(10), 10);
+        assert_eq!(budget.credits(), 15);
+        assert_eq!(budget.forfeit_up_to(30), 15);
+        assert_eq!(budget.credits(), 0);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::{
     Budget, CommandError, CommandOutcome, GameCommand, GridMap, MapSize, NETWORK_LINK_COST,
-    Network, NetworkError, Service, ServiceId, Tick, TickReport, Traffic,
+    Network, NetworkError, OUTAGE_PENALTY_PER_DROPPED_REQUEST, Service, ServiceId, ServiceState,
+    Tick, TickReport, Traffic,
 };
 
 const REVENUE_PER_SERVED_REQUEST: u64 = 1;
@@ -136,6 +137,17 @@ impl Simulation {
         let dropped = received - served;
         let revenue = served.saturating_mul(REVENUE_PER_SERVED_REQUEST);
         self.budget.credit(revenue);
+        let disruption_active = self
+            .services
+            .iter()
+            .any(|service| matches!(service.state(), ServiceState::Disrupted { .. }));
+        let failover_active = disruption_active && served > 0;
+        let assessed_penalty = if disruption_active {
+            dropped.saturating_mul(OUTAGE_PENALTY_PER_DROPPED_REQUEST)
+        } else {
+            0
+        };
+        let outage_penalty = self.budget.forfeit_up_to(assessed_penalty);
 
         TickReport {
             tick: self.tick,
@@ -143,6 +155,8 @@ impl Simulation {
             served,
             dropped,
             revenue,
+            outage_penalty,
+            failover_active,
             completed_services,
             link_traffic: routing.link_traffic,
             cyberattack,
@@ -535,6 +549,7 @@ mod tests {
         }
         assert_eq!(report.served, 100);
         assert_eq!(report.cyberattack, None);
+        let credits_before_attack = simulation.budget().credits();
 
         let attacked = simulation.advance();
         assert_eq!(
@@ -546,9 +561,18 @@ mod tests {
             })
         );
         assert_eq!(attacked.served, 0);
-        assert_eq!(simulation.advance().served, 0);
+        assert_eq!(attacked.outage_penalty, 100);
+        assert!(!attacked.failover_active);
+        assert_eq!(
+            simulation.budget().credits(),
+            credits_before_attack - attacked.outage_penalty
+        );
+        let still_disrupted = simulation.advance();
+        assert_eq!(still_disrupted.served, 0);
+        assert_eq!(still_disrupted.outage_penalty, 100);
         let recovered = simulation.advance();
         assert_eq!(recovered.served, 100);
+        assert_eq!(recovered.outage_penalty, 0);
         assert_eq!(
             simulation.service(server).map(|service| service.state()),
             Some(ServiceState::Operational)
@@ -588,8 +612,69 @@ mod tests {
             })
         );
         assert_eq!(report.served, 100);
+        assert_eq!(report.outage_penalty, 0);
+        assert!(!report.failover_active);
         assert_eq!(
             simulation.service(server).map(|service| service.state()),
+            Some(ServiceState::Operational)
+        );
+    }
+
+    #[test]
+    fn redundant_server_keeps_traffic_flowing_during_a_breach() {
+        let mut simulation = Simulation::new(500, 100, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let load_balancer = build(&mut simulation, ServiceKind::LoadBalancer, position(1, 0));
+        let first_server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(2, 0),
+        );
+        let second_server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(3, 0),
+        );
+        for (from, to) in [
+            (gateway, load_balancer),
+            (load_balancer, first_server),
+            (load_balancer, second_server),
+        ] {
+            simulation
+                .apply(GameCommand::ConnectServices { from, to })
+                .expect("test links are affordable");
+        }
+
+        let mut report = simulation.advance();
+        while report.tick.number() < crate::CYBER_ATTACK_INTERVAL {
+            report = simulation.advance();
+        }
+        assert_eq!(
+            report.cyberattack,
+            Some(crate::CyberAttackReport {
+                target: first_server,
+                blocked: false,
+                disruption_ticks: crate::DISRUPTION_TICKS,
+            })
+        );
+        assert!(report.failover_active);
+        assert_eq!(report.served, 100);
+        assert_eq!(report.dropped, 0);
+        assert_eq!(report.outage_penalty, 0);
+        assert!(matches!(
+            simulation
+                .service(first_server)
+                .map(|service| service.state()),
+            Some(ServiceState::Disrupted { .. })
+        ));
+        assert_eq!(
+            simulation
+                .service(second_server)
+                .map(|service| service.state()),
             Some(ServiceState::Operational)
         );
     }

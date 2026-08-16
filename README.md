@@ -46,3 +46,6 @@ In the graphical client:
 Cyberattacks arrive every eight ticks. An exposed application server is disrupted for two ticks.
 A firewall blocks the attack only when every directed path from an Internet Gateway to the target
 passes through an operational firewall; bypass connections remain vulnerable.
+During a breach, redundant application servers can keep requests flowing through a load balancer.
+Each request dropped while infrastructure is disrupted costs one credit, so partial capacity limits
+the damage and full failover avoids it.
