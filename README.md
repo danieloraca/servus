@@ -39,6 +39,7 @@ In the graphical client:
 - select a Gateway, Load Balancer, Application Server, or Firewall with 1, 2, 3, or 4;
 - click a highlighted free map tile to build;
 - press C, then click a source service and destination service to create a directed connection;
+- press X, then click its source and destination to remove a directed connection without a refund;
 - press Escape to cancel connection mode;
 - right-click a service to inspect its state, capacity, links, and current traffic;
 - compare revenue, operating costs, capital investment, and ROI in the economics panel;

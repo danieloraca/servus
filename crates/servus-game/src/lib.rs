@@ -170,6 +170,9 @@ fn build_service(
         CommandOutcome::ServicesConnected { .. } => {
             unreachable!("a build command cannot produce a connection outcome")
         }
+        CommandOutcome::ServicesDisconnected { .. } => {
+            unreachable!("a build command cannot produce a disconnection outcome")
+        }
     }
 }
 

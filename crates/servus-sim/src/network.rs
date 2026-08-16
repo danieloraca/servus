@@ -42,6 +42,20 @@ impl Network {
     pub(crate) fn add_link(&mut self, from: ServiceId, to: ServiceId) {
         self.links.push(NetworkLink { from, to });
     }
+
+    pub(crate) fn remove_link(
+        &mut self,
+        from: ServiceId,
+        to: ServiceId,
+    ) -> Result<(), NetworkError> {
+        let index = self
+            .links
+            .iter()
+            .position(|link| link.from == from && link.to == to)
+            .ok_or(NetworkError::MissingLink { from, to })?;
+        self.links.remove(index);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +63,7 @@ pub enum NetworkError {
     UnknownService(ServiceId),
     SelfConnection(ServiceId),
     DuplicateLink { from: ServiceId, to: ServiceId },
+    MissingLink { from: ServiceId, to: ServiceId },
 }
 
 impl fmt::Display for NetworkError {
@@ -61,6 +76,12 @@ impl fmt::Display for NetworkError {
             Self::DuplicateLink { from, to } => write!(
                 formatter,
                 "network link {} -> {} already exists",
+                from.value(),
+                to.value()
+            ),
+            Self::MissingLink { from, to } => write!(
+                formatter,
+                "network link {} -> {} does not exist",
                 from.value(),
                 to.value()
             ),
@@ -116,6 +137,26 @@ mod tests {
     }
 
     #[test]
+    fn directed_links_can_be_removed_without_affecting_the_reverse_direction() {
+        let mut network = Network::default();
+        let first = ServiceId::new(1);
+        let second = ServiceId::new(2);
+        network.add_link(first, second);
+        network.add_link(second, first);
+
+        assert_eq!(network.remove_link(first, second), Ok(()));
+        assert!(!network.has_link(first, second));
+        assert!(network.has_link(second, first));
+        assert_eq!(
+            network.remove_link(first, second),
+            Err(NetworkError::MissingLink {
+                from: first,
+                to: second,
+            })
+        );
+    }
+
+    #[test]
     fn network_errors_have_readable_messages() {
         assert_eq!(
             NetworkError::UnknownService(ServiceId::new(7)).to_string(),
@@ -132,6 +173,14 @@ mod tests {
             }
             .to_string(),
             "network link 1 -> 2 already exists"
+        );
+        assert_eq!(
+            NetworkError::MissingLink {
+                from: ServiceId::new(4),
+                to: ServiceId::new(5),
+            }
+            .to_string(),
+            "network link 4 -> 5 does not exist"
         );
     }
 

@@ -110,6 +110,23 @@ impl Simulation {
 
                 Ok(CommandOutcome::ServicesConnected { from, to })
             }
+            GameCommand::DisconnectServices { from, to } => {
+                if self.service(from).is_none() {
+                    return Err(CommandError::InvalidNetwork(NetworkError::UnknownService(
+                        from,
+                    )));
+                }
+                if self.service(to).is_none() {
+                    return Err(CommandError::InvalidNetwork(NetworkError::UnknownService(
+                        to,
+                    )));
+                }
+                self.network
+                    .remove_link(from, to)
+                    .map_err(CommandError::InvalidNetwork)?;
+
+                Ok(CommandOutcome::ServicesDisconnected { from, to })
+            }
         }
     }
 
@@ -195,6 +212,9 @@ mod tests {
         {
             CommandOutcome::ServiceBuilt { id, .. } => id,
             CommandOutcome::ServicesConnected { .. } => {
+                panic!("a build command must produce a service")
+            }
+            CommandOutcome::ServicesDisconnected { .. } => {
                 panic!("a build command must produce a service")
             }
         }
@@ -412,6 +432,60 @@ mod tests {
             }))
         );
         assert_eq!(simulation, before_invalid_command);
+    }
+
+    #[test]
+    fn disconnecting_services_is_free_and_stops_traffic() {
+        let mut simulation = Simulation::new(170, 100, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            })
+            .expect("test connection is valid");
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
+        assert_eq!(simulation.advance().served, 100);
+        let credits_before = simulation.budget().credits();
+
+        assert_eq!(
+            simulation.apply(GameCommand::DisconnectServices {
+                from: gateway,
+                to: server,
+            }),
+            Ok(CommandOutcome::ServicesDisconnected {
+                from: gateway,
+                to: server,
+            })
+        );
+        assert_eq!(simulation.budget().credits(), credits_before);
+        let disconnected = simulation.advance();
+        assert_eq!(disconnected.served, 0);
+        assert_eq!(disconnected.dropped, 100);
+
+        let before_failed_command = simulation.clone();
+        assert_eq!(
+            simulation.apply(GameCommand::DisconnectServices {
+                from: gateway,
+                to: server,
+            }),
+            Err(CommandError::InvalidNetwork(NetworkError::MissingLink {
+                from: gateway,
+                to: server,
+            }))
+        );
+        assert_eq!(simulation, before_failed_command);
     }
 
     #[test]

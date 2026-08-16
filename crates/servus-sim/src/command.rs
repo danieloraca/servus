@@ -13,6 +13,10 @@ pub enum GameCommand {
         from: ServiceId,
         to: ServiceId,
     },
+    DisconnectServices {
+        from: ServiceId,
+        to: ServiceId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,6 +27,10 @@ pub enum CommandOutcome {
         position: GridPosition,
     },
     ServicesConnected {
+        from: ServiceId,
+        to: ServiceId,
+    },
+    ServicesDisconnected {
         from: ServiceId,
         to: ServiceId,
     },

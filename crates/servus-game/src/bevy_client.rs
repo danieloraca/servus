@@ -58,16 +58,23 @@ struct EconomicsText;
 struct BuildTool {
     selected: ServiceKind,
     hovered: Option<GridPosition>,
-    connecting: bool,
+    network_mode: Option<NetworkMode>,
     connection_from: Option<ServiceId>,
     inspected: Option<ServiceId>,
     feedback: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkMode {
+    Connect,
+    Disconnect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectionAction {
     SourceSelected(ServiceId),
     Connected { from: ServiceId, to: ServiceId },
+    Disconnected { from: ServiceId, to: ServiceId },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,7 +168,7 @@ pub fn run_bevy_client() {
         .insert_resource(BuildTool {
             selected: ServiceKind::ApplicationServer,
             hovered: None,
-            connecting: false,
+            network_mode: None,
             connection_from: None,
             inspected: None,
             feedback: "Select with 1–4, then click a free tile".to_owned(),
@@ -183,7 +190,7 @@ pub fn run_bevy_client() {
                 restart_game,
                 toggle_pause,
                 select_building,
-                toggle_connection_mode,
+                toggle_network_mode,
                 adjust_demand,
                 move_camera,
                 advance_simulation,
@@ -234,7 +241,9 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD: move   1–4: build   C: connect   -/+: demand   R: restart"),
+        Text::new(
+            "WASD: move   1–4: build   C: connect   X: disconnect   -/+: demand   R: restart",
+        ),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -348,25 +357,32 @@ fn select_building(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>)
 
     if let Some(kind) = selected {
         tool.selected = kind;
-        tool.connecting = false;
+        tool.network_mode = None;
         tool.connection_from = None;
         tool.feedback = format!("Selected {}", service_kind_name(kind));
     }
 }
 
-fn toggle_connection_mode(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>) {
-    if keys.just_pressed(KeyCode::KeyC) {
-        tool.connecting = !tool.connecting;
+fn toggle_network_mode(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>) {
+    let requested_mode = if keys.just_pressed(KeyCode::KeyC) {
+        Some(NetworkMode::Connect)
+    } else if keys.just_pressed(KeyCode::KeyX) {
+        Some(NetworkMode::Disconnect)
+    } else {
+        None
+    };
+    if let Some(requested_mode) = requested_mode {
+        tool.network_mode = (tool.network_mode != Some(requested_mode)).then_some(requested_mode);
         tool.connection_from = None;
-        tool.feedback = if tool.connecting {
-            "Connection mode: click the source service".to_owned()
-        } else {
-            format!("Selected {}", service_kind_name(tool.selected))
+        tool.feedback = match tool.network_mode {
+            Some(NetworkMode::Connect) => "Connection mode: click the source service".to_owned(),
+            Some(NetworkMode::Disconnect) => "Disconnect mode: click the source service".to_owned(),
+            None => format!("Selected {}", service_kind_name(tool.selected)),
         };
-    } else if keys.just_pressed(KeyCode::Escape) && tool.connecting {
-        tool.connecting = false;
+    } else if keys.just_pressed(KeyCode::Escape) && tool.network_mode.is_some() {
+        tool.network_mode = None;
         tool.connection_from = None;
-        tool.feedback = "Connection cancelled".to_owned();
+        tool.feedback = "Network edit cancelled".to_owned();
     }
 }
 
@@ -454,8 +470,13 @@ fn handle_map_click(
         return;
     };
 
-    if tool.connecting {
-        match try_connection_click(&mut client.simulation, &mut tool.connection_from, position) {
+    if let Some(mode) = tool.network_mode {
+        match try_connection_click(
+            &mut client.simulation,
+            &mut tool.connection_from,
+            position,
+            mode,
+        ) {
             Ok(ConnectionAction::SourceSelected(id)) => {
                 tool.feedback = format!(
                     "Source {} selected; click a destination",
@@ -470,8 +491,19 @@ fn handle_map_click(
                     service_description(&client.simulation, to)
                 );
             }
+            Ok(ConnectionAction::Disconnected { from, to }) => {
+                tool.feedback = format!(
+                    "Disconnected {} → {}",
+                    service_description(&client.simulation, from),
+                    service_description(&client.simulation, to)
+                );
+            }
             Err(error) => {
-                tool.feedback = format!("Cannot connect: {error}");
+                let action = match mode {
+                    NetworkMode::Connect => "connect",
+                    NetworkMode::Disconnect => "disconnect",
+                };
+                tool.feedback = format!("Cannot {action}: {error}");
             }
         }
         return;
@@ -621,7 +653,14 @@ fn draw_map(
         };
         let start = grid_to_world(map_size, from.position());
         let end = grid_to_world(map_size, to.position());
-        draw_arrow(&mut gizmos, start, end, Color::srgb(0.35, 0.75, 0.95));
+        let selected_for_removal = tool.network_mode == Some(NetworkMode::Disconnect)
+            && tool.connection_from == Some(link.from);
+        let color = if selected_for_removal {
+            Color::srgb(1.0, 0.28, 0.22)
+        } else {
+            Color::srgb(0.35, 0.75, 0.95)
+        };
+        draw_arrow(&mut gizmos, start, end, color);
     }
 
     if let Some(report) = &client.last_report {
@@ -650,7 +689,7 @@ fn draw_map(
         );
     }
 
-    if tool.connecting {
+    if let Some(mode) = tool.network_mode {
         if let Some(from_id) = tool.connection_from
             && let Some(from) = simulation.service(from_id)
         {
@@ -662,14 +701,19 @@ fn draw_map(
             );
             if let Some(position) = tool.hovered {
                 let end = grid_to_world(map_size, position);
+                let valid = simulation
+                    .map()
+                    .service_at(position)
+                    .is_some_and(|to| match mode {
+                        NetworkMode::Connect => can_connect(simulation, from_id, to),
+                        NetworkMode::Disconnect => can_disconnect(simulation, from_id, to),
+                    });
                 let color = simulation.map().service_at(position).map_or(
                     Color::srgb(0.95, 0.3, 0.32),
-                    |to| {
-                        if can_connect(simulation, from_id, to) {
-                            Color::srgb(0.35, 0.95, 0.58)
-                        } else {
-                            Color::srgb(0.95, 0.3, 0.32)
-                        }
+                    |_| match (mode, valid) {
+                        (NetworkMode::Connect, true) => Color::srgb(0.35, 0.95, 0.58),
+                        (NetworkMode::Disconnect, true) => Color::srgb(1.0, 0.55, 0.18),
+                        _ => Color::srgb(0.95, 0.3, 0.32),
                     },
                 );
                 draw_arrow(&mut gizmos, start, end, color);
@@ -806,6 +850,9 @@ fn build_service(
         CommandOutcome::ServicesConnected { .. } => {
             unreachable!("a build command cannot produce a connection outcome")
         }
+        CommandOutcome::ServicesDisconnected { .. } => {
+            unreachable!("a build command cannot produce a disconnection outcome")
+        }
     }
 }
 
@@ -820,6 +867,7 @@ fn try_connection_click(
     simulation: &mut Simulation,
     connection_from: &mut Option<ServiceId>,
     position: GridPosition,
+    mode: NetworkMode,
 ) -> Result<ConnectionAction, ConnectionClickError> {
     let clicked = simulation
         .map()
@@ -830,8 +878,12 @@ fn try_connection_click(
         return Ok(ConnectionAction::SourceSelected(clicked));
     };
 
+    let command = match mode {
+        NetworkMode::Connect => GameCommand::ConnectServices { from, to: clicked },
+        NetworkMode::Disconnect => GameCommand::DisconnectServices { from, to: clicked },
+    };
     let outcome = simulation
-        .apply(GameCommand::ConnectServices { from, to: clicked })
+        .apply(command)
         .map_err(ConnectionClickError::Command)?;
     match outcome {
         CommandOutcome::ServicesConnected { from, to } => {
@@ -839,7 +891,11 @@ fn try_connection_click(
             Ok(ConnectionAction::Connected { from, to })
         }
         CommandOutcome::ServiceBuilt { .. } => {
-            unreachable!("a connection command cannot produce a build outcome")
+            unreachable!("a network command cannot produce a build outcome")
+        }
+        CommandOutcome::ServicesDisconnected { from, to } => {
+            *connection_from = None;
+            Ok(ConnectionAction::Disconnected { from, to })
         }
     }
 }
@@ -848,6 +904,13 @@ fn can_connect(simulation: &Simulation, from: ServiceId, to: ServiceId) -> bool 
     let mut preview = simulation.clone();
     preview
         .apply(GameCommand::ConnectServices { from, to })
+        .is_ok()
+}
+
+fn can_disconnect(simulation: &Simulation, from: ServiceId, to: ServiceId) -> bool {
+    let mut preview = simulation.clone();
+    preview
+        .apply(GameCommand::DisconnectServices { from, to })
         .is_ok()
 }
 
@@ -1081,7 +1144,7 @@ fn reset_scenario(
 
     tool.selected = ServiceKind::ApplicationServer;
     tool.hovered = None;
-    tool.connecting = false;
+    tool.network_mode = None;
     tool.connection_from = None;
     tool.inspected = None;
     tool.feedback = "Scenario restarted; select with 1–4".to_owned();
@@ -1171,10 +1234,19 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let demand = simulation.traffic().requests_per_tick();
     let served = report.map_or(0, |report| report.served);
     let dropped = report.map_or(0, |report| report.dropped);
-    let mode = if tool.connecting {
+    let mode = if let Some(network_mode) = tool.network_mode {
+        let action = match network_mode {
+            NetworkMode::Connect => "Connect",
+            NetworkMode::Disconnect => "Disconnect",
+        };
         tool.connection_from.map_or_else(
-            || "Mode: Connect (choose source)".to_owned(),
-            |id| format!("Mode: Connect from {}", service_description(simulation, id)),
+            || format!("Mode: {action} (choose source)"),
+            |id| {
+                format!(
+                    "Mode: {action} from {}",
+                    service_description(simulation, id)
+                )
+            },
         )
     } else {
         format!(
@@ -1189,7 +1261,7 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     let objectives = objectives_text(client);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\nX  Disconnect tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -1380,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_tool_selects_a_source_and_creates_a_directed_link() {
+    fn network_tools_create_and_remove_a_directed_link() {
         let map = MapSize::new(3, 3).expect("test map is valid");
         let mut simulation = Simulation::new(300, 0, map);
         let gateway = build_service(
@@ -1398,13 +1470,23 @@ mod tests {
         let mut from = None;
 
         assert_eq!(
-            try_connection_click(&mut simulation, &mut from, gateway.position()),
+            try_connection_click(
+                &mut simulation,
+                &mut from,
+                gateway.position(),
+                NetworkMode::Connect,
+            ),
             Ok(ConnectionAction::SourceSelected(gateway.id()))
         );
         assert_eq!(from, Some(gateway.id()));
         assert!(can_connect(&simulation, gateway.id(), server.id()));
         assert_eq!(
-            try_connection_click(&mut simulation, &mut from, server.position()),
+            try_connection_click(
+                &mut simulation,
+                &mut from,
+                server.position(),
+                NetworkMode::Connect,
+            ),
             Ok(ConnectionAction::Connected {
                 from: gateway.id(),
                 to: server.id(),
@@ -1415,6 +1497,63 @@ mod tests {
         assert!(!simulation.network().has_link(server.id(), gateway.id()));
         assert_eq!(simulation.budget().credits(), 140);
         assert!(!can_connect(&simulation, gateway.id(), server.id()));
+
+        assert!(can_disconnect(&simulation, gateway.id(), server.id()));
+        assert!(!can_disconnect(&simulation, server.id(), gateway.id()));
+        assert_eq!(
+            try_connection_click(
+                &mut simulation,
+                &mut from,
+                gateway.position(),
+                NetworkMode::Disconnect,
+            ),
+            Ok(ConnectionAction::SourceSelected(gateway.id()))
+        );
+        assert_eq!(
+            try_connection_click(
+                &mut simulation,
+                &mut from,
+                server.position(),
+                NetworkMode::Disconnect,
+            ),
+            Ok(ConnectionAction::Disconnected {
+                from: gateway.id(),
+                to: server.id(),
+            })
+        );
+        assert!(!simulation.network().has_link(gateway.id(), server.id()));
+        assert_eq!(simulation.budget().credits(), 140);
+    }
+
+    #[test]
+    fn failed_disconnect_preserves_the_source_and_simulation() {
+        let map = MapSize::new(2, 2).expect("test map is valid");
+        let mut simulation = Simulation::new(150, 0, map);
+        let gateway = build_service(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            GridPosition::new(0, 0),
+        )
+        .expect("gateway placement is valid");
+        let server = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(1, 0),
+        )
+        .expect("server placement is valid");
+        let mut from = Some(gateway.id());
+        let before = simulation.clone();
+
+        let error = try_connection_click(
+            &mut simulation,
+            &mut from,
+            server.position(),
+            NetworkMode::Disconnect,
+        )
+        .expect_err("a missing directed link cannot be disconnected");
+        assert_eq!(error.to_string(), "network link 1 -> 2 does not exist");
+        assert_eq!(from, Some(gateway.id()));
+        assert_eq!(simulation, before);
     }
 
     #[test]
@@ -1431,7 +1570,7 @@ mod tests {
         let before = simulation.clone();
         let empty = GridPosition::new(2, 2);
 
-        let error = try_connection_click(&mut simulation, &mut from, empty)
+        let error = try_connection_click(&mut simulation, &mut from, empty, NetworkMode::Connect)
             .expect_err("an empty tile is not a connection destination");
         assert_eq!(error, ConnectionClickError::EmptyTile(empty));
         assert_eq!(error.to_string(), "tile (2, 2) has no service");
@@ -1459,8 +1598,13 @@ mod tests {
         let mut from = Some(gateway.id());
         let before = simulation.clone();
 
-        let error = try_connection_click(&mut simulation, &mut from, server.position())
-            .expect_err("no credits remain for the connection");
+        let error = try_connection_click(
+            &mut simulation,
+            &mut from,
+            server.position(),
+            NetworkMode::Connect,
+        )
+        .expect_err("no credits remain for the connection");
         assert_eq!(
             error.to_string(),
             "not enough credits: 10 required, 0 available"
@@ -1745,7 +1889,7 @@ mod tests {
         let mut tool = BuildTool {
             selected: ServiceKind::InternetGateway,
             hovered: Some(GridPosition::new(1, 1)),
-            connecting: true,
+            network_mode: Some(NetworkMode::Connect),
             connection_from: Some(inspected),
             inspected: Some(inspected),
             feedback: "Old state".to_owned(),
@@ -1772,7 +1916,7 @@ mod tests {
         assert_eq!(client.operating_cost_shortfall, 0);
         assert_eq!(client.operating_profit, 0);
         assert_eq!(tool.selected, ServiceKind::ApplicationServer);
-        assert!(!tool.connecting);
+        assert_eq!(tool.network_mode, None);
         assert_eq!(tool.connection_from, None);
         assert_eq!(tool.inspected, None);
         assert_eq!(progress.completed, [false; OBJECTIVE_COUNT]);
@@ -1801,7 +1945,7 @@ mod tests {
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
             hovered: None,
-            connecting: false,
+            network_mode: None,
             connection_from: None,
             inspected: None,
             feedback: "Ready".to_owned(),
@@ -1871,7 +2015,7 @@ mod tests {
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
             hovered: None,
-            connecting: true,
+            network_mode: Some(NetworkMode::Connect),
             connection_from: Some(source),
             inspected: None,
             feedback: "Choose destination".to_owned(),
