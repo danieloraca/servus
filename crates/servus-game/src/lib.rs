@@ -18,6 +18,10 @@ pub const DEMO_GATEWAY_POSITION: GridPosition = GridPosition::new(1, 4);
 pub const DEMO_LOAD_BALANCER_POSITION: GridPosition = GridPosition::new(3, 4);
 pub const DEMO_SERVER_ONE_POSITION: GridPosition = GridPosition::new(5, 3);
 pub const DEMO_SERVER_TWO_POSITION: GridPosition = GridPosition::new(5, 5);
+pub const NEW_GAME_STARTING_CREDITS: u64 = 500;
+pub const NEW_GAME_REQUESTS_PER_TICK: u64 = 100;
+pub const NEW_GAME_MAP_WIDTH: u16 = 8;
+pub const NEW_GAME_MAP_HEIGHT: u16 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DemoPlacement {
@@ -86,6 +90,15 @@ pub fn run_demo() -> Result<DemoResult, DemoError> {
         frames,
         remaining_credits: simulation.budget().credits(),
     })
+}
+
+pub fn create_new_game() -> Result<Simulation, MapSizeError> {
+    let map_size = MapSize::new(NEW_GAME_MAP_WIDTH, NEW_GAME_MAP_HEIGHT)?;
+    Ok(Simulation::new(
+        NEW_GAME_STARTING_CREDITS,
+        NEW_GAME_REQUESTS_PER_TICK,
+        map_size,
+    ))
 }
 
 pub fn create_demo_scenario() -> Result<DemoScenario, DemoError> {
@@ -209,6 +222,24 @@ mod tests {
         assert_eq!(scenario.simulation.services().len(), 4);
         assert_eq!(scenario.simulation.network().links().len(), 3);
         assert_eq!(scenario.placements.len(), 4);
+    }
+
+    #[test]
+    fn new_game_starts_empty_with_room_to_build_a_solution() {
+        let simulation = create_new_game().expect("new-game map dimensions are valid");
+        assert_eq!(simulation.tick().number(), 0);
+        assert_eq!(simulation.budget().credits(), NEW_GAME_STARTING_CREDITS);
+        assert_eq!(
+            simulation.traffic().requests_per_tick(),
+            NEW_GAME_REQUESTS_PER_TICK
+        );
+        assert_eq!(
+            simulation.map().size(),
+            MapSize::new(NEW_GAME_MAP_WIDTH, NEW_GAME_MAP_HEIGHT)
+                .expect("new-game map dimensions are valid")
+        );
+        assert!(simulation.services().is_empty());
+        assert!(simulation.network().links().is_empty());
     }
 
     #[test]

@@ -6,7 +6,9 @@ use servus_sim::{
     ServiceKind, ServiceState, Simulation, TickReport,
 };
 
+#[cfg(test)]
 use crate::create_demo_scenario;
+use crate::create_new_game;
 
 const TILE_SIZE: f32 = 72.0;
 const MAP_OFFSET_X: f32 = 120.0;
@@ -15,6 +17,9 @@ const TICK_SECONDS: f32 = 1.25;
 const CAMERA_SPEED: f32 = 480.0;
 const MIN_CAMERA_SCALE: f32 = 0.55;
 const MAX_CAMERA_SCALE: f32 = 2.0;
+const DEMAND_STEP: u64 = 50;
+const MAX_DEMAND: u64 = 1_000;
+const SERVED_OBJECTIVE: u64 = 500;
 
 #[derive(Resource)]
 struct ClientSimulation {
@@ -22,6 +27,7 @@ struct ClientSimulation {
     last_report: Option<TickReport>,
     tick_timer: Timer,
     paused: bool,
+    total_served: u64,
 }
 
 #[derive(Component)]
@@ -80,16 +86,23 @@ struct VisualStyle {
     color: [f32; 3],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectiveStatus {
+    label: &'static str,
+    complete: bool,
+}
+
 pub fn run_bevy_client() {
-    let scenario = create_demo_scenario().expect("the built-in demo scenario must be valid");
+    let simulation = create_new_game().expect("the new-game map dimensions must be valid");
 
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.025, 0.04, 0.065)))
         .insert_resource(ClientSimulation {
-            simulation: scenario.simulation,
+            simulation,
             last_report: None,
             tick_timer: Timer::from_seconds(TICK_SECONDS, TimerMode::Repeating),
             paused: false,
+            total_served: 0,
         })
         .insert_resource(BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -115,6 +128,7 @@ pub fn run_bevy_client() {
                 toggle_pause,
                 select_building,
                 toggle_connection_mode,
+                adjust_demand,
                 move_camera,
                 advance_simulation,
                 update_service_visuals,
@@ -161,7 +175,9 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD: move   Wheel: zoom   1–3: build   C: connect   Right-click: inspect"),
+        Text::new(
+            "WASD: move   Wheel: zoom   1–3: build   C: connect   -/+: demand   Right-click: inspect",
+        ),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -234,6 +250,28 @@ fn toggle_connection_mode(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<Buil
         tool.connection_from = None;
         tool.feedback = "Connection cancelled".to_owned();
     }
+}
+
+fn adjust_demand(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut client: ResMut<ClientSimulation>,
+    mut tool: ResMut<BuildTool>,
+) {
+    let increase = if keys.just_pressed(KeyCode::Equal) {
+        Some(true)
+    } else if keys.just_pressed(KeyCode::Minus) {
+        Some(false)
+    } else {
+        None
+    };
+    let Some(increase) = increase else {
+        return;
+    };
+
+    let current = client.simulation.traffic().requests_per_tick();
+    let demand = adjusted_demand(current, increase);
+    client.simulation.set_requests_per_tick(demand);
+    tool.feedback = format!("Incoming demand set to {demand} requests/tick");
 }
 
 fn move_camera(
@@ -343,7 +381,9 @@ fn advance_simulation(time: Res<Time>, mut client: ResMut<ClientSimulation>) {
 
     client.tick_timer.tick(time.delta());
     if client.tick_timer.just_finished() {
-        client.last_report = Some(client.simulation.advance());
+        let report = client.simulation.advance();
+        client.total_served = client.total_served.saturating_add(report.served);
+        client.last_report = Some(report);
     }
 }
 
@@ -586,6 +626,14 @@ fn zoom_scale(current: f32, scroll_y: f32) -> f32 {
     (current * 0.85_f32.powf(scroll_y)).clamp(MIN_CAMERA_SCALE, MAX_CAMERA_SCALE)
 }
 
+fn adjusted_demand(current: u64, increase: bool) -> u64 {
+    if increase {
+        current.saturating_add(DEMAND_STEP).min(MAX_DEMAND)
+    } else {
+        current.saturating_sub(DEMAND_STEP)
+    }
+}
+
 fn build_service(
     simulation: &mut Simulation,
     kind: ServiceKind,
@@ -704,6 +752,46 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
     ))
 }
 
+fn objective_statuses(client: &ClientSimulation) -> [ObjectiveStatus; 5] {
+    let has_kind = |kind| {
+        client
+            .simulation
+            .services()
+            .iter()
+            .any(|service| service.kind() == kind)
+    };
+    [
+        ObjectiveStatus {
+            label: "Build an Internet Gateway",
+            complete: has_kind(ServiceKind::InternetGateway),
+        },
+        ObjectiveStatus {
+            label: "Build a Load Balancer",
+            complete: has_kind(ServiceKind::LoadBalancer),
+        },
+        ObjectiveStatus {
+            label: "Build an Application Server",
+            complete: has_kind(ServiceKind::ApplicationServer),
+        },
+        ObjectiveStatus {
+            label: "Route a live request",
+            complete: client.total_served > 0,
+        },
+        ObjectiveStatus {
+            label: "Serve 500 total requests",
+            complete: client.total_served >= SERVED_OBJECTIVE,
+        },
+    ]
+}
+
+fn objectives_text(client: &ClientSimulation) -> String {
+    let lines = objective_statuses(client).map(|objective| {
+        let marker = if objective.complete { "[x]" } else { "[ ]" };
+        format!("{marker} {}", objective.label)
+    });
+    format!("OBJECTIVES\n{}", lines.join("\n"))
+}
+
 fn visual_style(kind: ServiceKind) -> VisualStyle {
     match kind {
         ServiceKind::InternetGateway => VisualStyle {
@@ -750,7 +838,7 @@ fn scale_for_state(state: ServiceState, elapsed: f32) -> f32 {
 fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> String {
     let simulation = &client.simulation;
     let report = client.last_report.as_ref();
-    let received = report.map_or(0, |report| report.received);
+    let demand = simulation.traffic().requests_per_tick();
     let served = report.map_or(0, |report| report.served);
     let dropped = report.map_or(0, |report| report.dropped);
     let mode = if tool.connecting {
@@ -769,13 +857,15 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .inspected
         .and_then(|id| inspection_text(client, id))
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
+    let objectives = objectives_text(client);
     format!(
-        "SERVUS  {status}\n\nTick       {:>6}\nCredits    {:>6}\nDemand     {:>6}\nServed     {:>6}\nDropped    {:>6}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume",
         simulation.tick().number(),
         simulation.budget().credits(),
-        received,
+        demand,
         served,
         dropped,
+        client.total_served,
         tool.feedback,
     )
 }
@@ -844,6 +934,15 @@ mod tests {
         assert!(zoom_scale(1.0, -1.0) > 1.0);
         assert_eq!(zoom_scale(1.0, 100.0), MIN_CAMERA_SCALE);
         assert_eq!(zoom_scale(1.0, -100.0), MAX_CAMERA_SCALE);
+    }
+
+    #[test]
+    fn demand_adjustment_uses_fixed_steps_and_clamps_to_safe_bounds() {
+        assert_eq!(adjusted_demand(100, true), 150);
+        assert_eq!(adjusted_demand(100, false), 50);
+        assert_eq!(adjusted_demand(0, false), 0);
+        assert_eq!(adjusted_demand(MAX_DEMAND, true), MAX_DEMAND);
+        assert_eq!(adjusted_demand(MAX_DEMAND - 20, true), MAX_DEMAND);
     }
 
     #[test]
@@ -1026,6 +1125,66 @@ mod tests {
     }
 
     #[test]
+    fn objectives_follow_infrastructure_routing_and_total_service() {
+        let mut simulation = create_new_game().expect("new game is valid");
+        let gateway = build_service(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            GridPosition::new(0, 0),
+        )
+        .expect("gateway placement is valid");
+        let load_balancer = build_service(
+            &mut simulation,
+            ServiceKind::LoadBalancer,
+            GridPosition::new(1, 0),
+        )
+        .expect("load-balancer placement is valid");
+        let server = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(2, 0),
+        )
+        .expect("server placement is valid");
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway.id(),
+                to: load_balancer.id(),
+            })
+            .expect("first test connection is affordable");
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: load_balancer.id(),
+                to: server.id(),
+            })
+            .expect("second test connection is affordable");
+
+        let mut total_served = 0;
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            total_served += simulation.advance().served;
+        }
+        let mut client = ClientSimulation {
+            simulation,
+            last_report: None,
+            tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            paused: false,
+            total_served,
+        };
+        let objectives = objective_statuses(&client);
+        assert!(objectives[..4].iter().all(|objective| objective.complete));
+        assert!(!objectives[4].complete);
+
+        while client.total_served < SERVED_OBJECTIVE {
+            client.total_served += client.simulation.advance().served;
+        }
+        assert!(
+            objective_statuses(&client)
+                .iter()
+                .all(|objective| objective.complete)
+        );
+        assert!(objectives_text(&client).contains("[x] Serve 500 total requests"));
+    }
+
+    #[test]
     fn metrics_include_the_initial_scenario_state() {
         let scenario = create_demo_scenario().expect("demo scenario is valid");
         let client = ClientSimulation {
@@ -1033,6 +1192,7 @@ mod tests {
             last_report: None,
             tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             paused: false,
+            total_served: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1043,9 +1203,10 @@ mod tests {
             feedback: "Ready".to_owned(),
         };
         let text = metrics_text(&client, &tool, "RUNNING");
-        assert!(text.contains("Tick            0"));
-        assert!(text.contains("Credits        45"));
-        assert!(text.contains("Demand          0"));
+        assert!(text.contains("Tick              0"));
+        assert!(text.contains("Credits          45"));
+        assert!(text.contains("Demand          200"));
+        assert!(text.contains("Total served      0"));
         assert!(text.contains("Mode: Build Application Server (100)"));
         assert!(text.contains("Ready"));
     }
@@ -1059,6 +1220,7 @@ mod tests {
             last_report: None,
             tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             paused: false,
+            total_served: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1086,6 +1248,7 @@ mod tests {
             last_report: Some(report),
             tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             paused: false,
+            total_served: 150,
         };
 
         let text = inspection_text(&client, inspected).expect("the inspected service exists");

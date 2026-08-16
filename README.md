@@ -12,9 +12,9 @@ The current vertical slice supports deterministic ticks, positional infrastructu
 map bounds and occupancy, traffic capacity, dropped requests, and revenue.
 Infrastructure reserves map space while under construction and contributes capacity only after
 its construction timer completes.
-The Bevy client renders the map, infrastructure states, directed connections, and live simulation
-metrics in a native window. A separate three-tick ASCII view remains available for headless
-debugging.
+The Bevy client starts a playable empty-map scenario and renders infrastructure states, directed
+connections, live simulation metrics, and objectives in a native window. A separate deterministic
+three-tick ASCII scenario remains available for headless debugging.
 Incoming traffic now requires a directed, fully operational path from an Internet Gateway to an
 Application Server. Network links have their own construction cost and are shown in the terminal
 view.
@@ -38,5 +38,6 @@ In the graphical client:
 - press Escape to cancel connection mode;
 - right-click a service to inspect its state, capacity, links, and current traffic;
 - watch yellow request markers follow the exact traffic routed through each link;
+- use - and + to decrease or increase incoming demand by 50 requests per tick;
 - move the camera with WASD or the arrow keys and zoom with the mouse wheel;
 - press Space to pause or resume simulation ticks.
