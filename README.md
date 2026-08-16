@@ -12,6 +12,10 @@ The current vertical slice supports deterministic ticks, positional infrastructu
 map bounds and occupancy, traffic capacity, dropped requests, and revenue.
 Infrastructure reserves map space while under construction and contributes capacity only after
 its construction timer completes.
+Operational infrastructure also charges a recurring cost each tick: 2 credits for a Gateway,
+5 for a Firewall, 4 for a Load Balancer, and 8 for an Application Server. The client tracks
+revenue, operating profit, capital invested, unpaid costs, and infrastructure ROI; exhausting the
+budget while costs are due makes the solution insolvent.
 The Bevy client starts a playable empty-map scenario and renders infrastructure states, directed
 connections, live simulation metrics, and objectives in a native window. A separate deterministic
 three-tick ASCII scenario remains available for headless debugging.
@@ -37,6 +41,7 @@ In the graphical client:
 - press C, then click a source service and destination service to create a directed connection;
 - press Escape to cancel connection mode;
 - right-click a service to inspect its state, capacity, links, and current traffic;
+- compare revenue, operating costs, capital investment, and ROI in the economics panel;
 - watch yellow request markers follow the exact traffic routed through each link;
 - use - and + to decrease or increase incoming demand by 50 requests per tick;
 - move the camera with WASD or the arrow keys and zoom with the mouse wheel;

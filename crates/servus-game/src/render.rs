@@ -60,11 +60,13 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
     if let Some(report) = report {
         writeln!(
             output,
-            "Traffic: received={} | served={} | dropped={} | revenue={} | outage_penalty={} | failover={}",
+            "Traffic: received={} | served={} | dropped={} | revenue={} | opex={} | net={} | outage_penalty={} | failover={}",
             report.received,
             report.served,
             report.dropped,
             report.revenue,
+            report.operating_cost,
+            report.net_income,
             report.outage_penalty,
             report.failover_active,
         )

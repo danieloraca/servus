@@ -148,6 +148,13 @@ impl Simulation {
             0
         };
         let outage_penalty = self.budget.forfeit_up_to(assessed_penalty);
+        let assessed_operating_cost = self.services.iter().fold(0_u64, |total, service| {
+            total.saturating_add(service.current_operating_cost())
+        });
+        let paid_operating_cost = self.budget.forfeit_up_to(assessed_operating_cost);
+        let operating_cost_shortfall = assessed_operating_cost - paid_operating_cost;
+        let net_income =
+            i128::from(revenue) - i128::from(outage_penalty) - i128::from(assessed_operating_cost);
 
         TickReport {
             tick: self.tick,
@@ -157,6 +164,9 @@ impl Simulation {
             revenue,
             outage_penalty,
             failover_active,
+            operating_cost: assessed_operating_cost,
+            operating_cost_shortfall,
+            net_income,
             completed_services,
             link_traffic: routing.link_traffic,
             cyberattack,
@@ -292,6 +302,9 @@ mod tests {
         assert_eq!(first.served, 0);
         assert_eq!(first.dropped, 140);
         assert_eq!(first.completed_services, vec![gateway]);
+        assert_eq!(first.operating_cost, 2);
+        assert_eq!(first.operating_cost_shortfall, 2);
+        assert_eq!(first.net_income, -2);
 
         let second = simulation.advance();
         assert_eq!(second.served, 0);
@@ -303,8 +316,11 @@ mod tests {
         assert_eq!(third.served, 100);
         assert_eq!(third.dropped, 40);
         assert_eq!(third.revenue, 100);
+        assert_eq!(third.operating_cost, 10);
+        assert_eq!(third.operating_cost_shortfall, 0);
+        assert_eq!(third.net_income, 90);
         assert_eq!(third.completed_services, vec![server]);
-        assert_eq!(simulation.budget().credits(), 100);
+        assert_eq!(simulation.budget().credits(), 90);
     }
 
     #[test]
@@ -565,14 +581,17 @@ mod tests {
         assert!(!attacked.failover_active);
         assert_eq!(
             simulation.budget().credits(),
-            credits_before_attack - attacked.outage_penalty
+            credits_before_attack - attacked.outage_penalty - attacked.operating_cost
         );
         let still_disrupted = simulation.advance();
         assert_eq!(still_disrupted.served, 0);
         assert_eq!(still_disrupted.outage_penalty, 100);
+        assert_eq!(still_disrupted.operating_cost, 10);
         let recovered = simulation.advance();
         assert_eq!(recovered.served, 100);
         assert_eq!(recovered.outage_penalty, 0);
+        assert_eq!(recovered.operating_cost, 10);
+        assert_eq!(recovered.net_income, 90);
         assert_eq!(
             simulation.service(server).map(|service| service.state()),
             Some(ServiceState::Operational)
@@ -613,6 +632,8 @@ mod tests {
         );
         assert_eq!(report.served, 100);
         assert_eq!(report.outage_penalty, 0);
+        assert_eq!(report.operating_cost, 15);
+        assert_eq!(report.net_income, 85);
         assert!(!report.failover_active);
         assert_eq!(
             simulation.service(server).map(|service| service.state()),
@@ -665,6 +686,8 @@ mod tests {
         assert_eq!(report.served, 100);
         assert_eq!(report.dropped, 0);
         assert_eq!(report.outage_penalty, 0);
+        assert_eq!(report.operating_cost, 22);
+        assert_eq!(report.net_income, 78);
         assert!(matches!(
             simulation
                 .service(first_server)

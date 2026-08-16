@@ -44,6 +44,16 @@ impl ServiceKind {
     }
 
     #[must_use]
+    pub const fn operating_cost(self) -> u64 {
+        match self {
+            Self::InternetGateway => 2,
+            Self::Firewall => 5,
+            Self::LoadBalancer => 4,
+            Self::ApplicationServer => 8,
+        }
+    }
+
+    #[must_use]
     pub const fn traffic_capacity(self) -> Option<u64> {
         match self {
             Self::InternetGateway => None,
@@ -166,6 +176,16 @@ impl Service {
         }
     }
 
+    #[must_use]
+    pub const fn current_operating_cost(self) -> u64 {
+        match self.state {
+            ServiceState::UnderConstruction { .. } => 0,
+            ServiceState::Operational | ServiceState::Disrupted { .. } => {
+                self.kind.operating_cost()
+            }
+        }
+    }
+
     pub(crate) fn advance_construction(&mut self) -> bool {
         match self.state {
             ServiceState::UnderConstruction { ticks_remaining: 1 } => {
@@ -211,6 +231,7 @@ mod tests {
     fn application_server_has_an_initial_cost_and_capacity() {
         let kind = ServiceKind::ApplicationServer;
         assert_eq!(kind.build_cost(), 100);
+        assert_eq!(kind.operating_cost(), 8);
         assert_eq!(kind.traffic_capacity(), Some(100));
         assert!(kind.serves_requests());
         assert_eq!(kind.construction_ticks(), 3);
@@ -220,6 +241,7 @@ mod tests {
     fn internet_gateway_is_cheap_and_does_not_handle_application_requests() {
         let kind = ServiceKind::InternetGateway;
         assert_eq!(kind.build_cost(), 50);
+        assert_eq!(kind.operating_cost(), 2);
         assert_eq!(kind.traffic_capacity(), None);
         assert!(!kind.serves_requests());
         assert_eq!(kind.construction_ticks(), 1);
@@ -231,6 +253,7 @@ mod tests {
     fn load_balancer_has_less_capacity_than_two_application_servers() {
         let kind = ServiceKind::LoadBalancer;
         assert_eq!(kind.build_cost(), 75);
+        assert_eq!(kind.operating_cost(), 4);
         assert_eq!(kind.traffic_capacity(), Some(150));
         assert!(!kind.serves_requests());
         assert_eq!(kind.construction_ticks(), 2);
@@ -240,6 +263,7 @@ mod tests {
     fn firewall_has_a_cost_construction_time_and_throughput_limit() {
         let kind = ServiceKind::Firewall;
         assert_eq!(kind.build_cost(), 125);
+        assert_eq!(kind.operating_cost(), 5);
         assert_eq!(kind.traffic_capacity(), Some(200));
         assert!(!kind.serves_requests());
         assert_eq!(kind.construction_ticks(), 2);
@@ -257,6 +281,7 @@ mod tests {
             ServiceState::UnderConstruction { ticks_remaining: 3 }
         );
         assert_eq!(service.traffic_capacity(500), 0);
+        assert_eq!(service.current_operating_cost(), 0);
     }
 
     #[test]
@@ -296,6 +321,7 @@ mod tests {
         assert!(service.advance_construction());
         assert_eq!(service.state(), ServiceState::Operational);
         assert_eq!(service.traffic_capacity(500), 100);
+        assert_eq!(service.current_operating_cost(), 8);
         assert!(service.is_operational());
         assert!(!service.advance_construction());
     }
@@ -324,6 +350,7 @@ mod tests {
         assert!(service.disrupt(2));
         assert!(!service.is_operational());
         assert_eq!(service.traffic_capacity(100), 0);
+        assert_eq!(service.current_operating_cost(), 2);
         assert!(!service.advance_construction());
         assert_eq!(
             service.state(),

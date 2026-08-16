@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResolution};
 use servus_sim::{
     CYBER_ATTACK_INTERVAL, CommandError, CommandOutcome, GameCommand, GridPosition, MapSize,
-    Service, ServiceId, ServiceKind, ServiceState, Simulation, TickReport,
+    NETWORK_LINK_COST, Service, ServiceId, ServiceKind, ServiceState, Simulation, TickReport,
 };
 
 #[cfg(test)]
@@ -23,7 +23,7 @@ const DEMAND_STEP: u64 = 50;
 const MAX_DEMAND: u64 = 1_000;
 const SERVED_OBJECTIVE: u64 = 500;
 const NOTIFICATION_SECONDS: f32 = 3.0;
-const OBJECTIVE_COUNT: usize = 7;
+const OBJECTIVE_COUNT: usize = 8;
 
 #[derive(Resource)]
 struct ClientSimulation {
@@ -35,6 +35,11 @@ struct ClientSimulation {
     blocked_attacks: u64,
     successful_failovers: u64,
     outage_losses: u64,
+    capital_invested: u64,
+    total_revenue: u64,
+    operating_costs: u64,
+    operating_cost_shortfall: u64,
+    operating_profit: i128,
 }
 
 #[derive(Component)]
@@ -45,6 +50,9 @@ struct MetricsText;
 
 #[derive(Component)]
 struct NotificationText;
+
+#[derive(Component)]
+struct EconomicsText;
 
 #[derive(Resource)]
 struct BuildTool {
@@ -144,6 +152,11 @@ pub fn run_bevy_client() {
             blocked_attacks: 0,
             successful_failovers: 0,
             outage_losses: 0,
+            capital_invested: 0,
+            total_revenue: 0,
+            operating_costs: 0,
+            operating_cost_shortfall: 0,
+            operating_profit: 0,
         })
         .insert_resource(BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -176,6 +189,7 @@ pub fn run_bevy_client() {
                 advance_simulation,
                 update_service_visuals,
                 update_metrics,
+                update_economics,
                 update_notification,
             )
                 .chain(),
@@ -244,6 +258,22 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
             ..default()
         },
         NotificationText,
+    ));
+
+    commands.spawn((
+        Text::new("Loading economy…"),
+        TextFont::from_font_size(16.0),
+        TextColor(Color::srgb(0.82, 0.91, 0.8)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(22.0),
+            top: Val::Px(72.0),
+            padding: UiRect::all(Val::Px(14.0)),
+            width: Val::Px(245.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.94)),
+        EconomicsText,
     ));
 }
 
@@ -433,6 +463,7 @@ fn handle_map_click(
                 );
             }
             Ok(ConnectionAction::Connected { from, to }) => {
+                client.capital_invested = client.capital_invested.saturating_add(NETWORK_LINK_COST);
                 tool.feedback = format!(
                     "Connected {} → {}",
                     service_description(&client.simulation, from),
@@ -448,6 +479,9 @@ fn handle_map_click(
 
     match build_service(&mut client.simulation, tool.selected, position) {
         Ok(service) => {
+            client.capital_invested = client
+                .capital_invested
+                .saturating_add(service.kind().build_cost());
             spawn_service_visual(&mut commands, client.simulation.map().size(), service);
             tool.feedback = format!(
                 "Building {} at ({}, {})",
@@ -478,6 +512,12 @@ fn advance_simulation(time: Res<Time>, mut client: ResMut<ClientSimulation>) {
             client.successful_failovers = client.successful_failovers.saturating_add(1);
         }
         client.outage_losses = client.outage_losses.saturating_add(report.outage_penalty);
+        client.total_revenue = client.total_revenue.saturating_add(report.revenue);
+        client.operating_costs = client.operating_costs.saturating_add(report.operating_cost);
+        client.operating_cost_shortfall = client
+            .operating_cost_shortfall
+            .saturating_add(report.operating_cost_shortfall);
+        client.operating_profit = client.operating_profit.saturating_add(report.net_income);
         client.last_report = Some(report);
     }
 }
@@ -505,14 +545,27 @@ fn update_metrics(
     progress: Res<GameProgress>,
     mut text: Single<&mut Text, With<MetricsText>>,
 ) {
+    let insolvent = client
+        .last_report
+        .as_ref()
+        .is_some_and(|report| report.operating_cost_shortfall > 0);
     let status = if progress.won {
         "VICTORY"
+    } else if insolvent {
+        "INSOLVENT"
     } else if client.paused {
         "PAUSED"
     } else {
         "RUNNING"
     };
     **text = Text::new(metrics_text(&client, &tool, status));
+}
+
+fn update_economics(
+    client: Res<ClientSimulation>,
+    mut text: Single<&mut Text, With<EconomicsText>>,
+) {
+    **text = Text::new(economics_text(&client));
 }
 
 fn draw_map(
@@ -844,13 +897,14 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
         |capacity| format!("{capacity} req/tick"),
     );
     Some(format!(
-        "INSPECT\n{} #{}\nTile          ({}, {})\nState         {}\nCapacity      {}\nLinks in/out  {}/{}\nFlow in/out   {}/{}",
+        "INSPECT\n{} #{}\nTile          ({}, {})\nState         {}\nCapacity      {}\nRun cost      {}/tick\nLinks in/out  {}/{}\nFlow in/out   {}/{}",
         service_kind_name(service.kind()),
         id.value(),
         position.x,
         position.y,
         service.state(),
         capacity,
+        service.kind().operating_cost(),
         incoming_links,
         outgoing_links,
         incoming_traffic,
@@ -894,6 +948,11 @@ fn objective_statuses(client: &ClientSimulation) -> [ObjectiveStatus; OBJECTIVE_
         ObjectiveStatus {
             label: "Serve 500 total requests",
             complete: client.total_served >= SERVED_OBJECTIVE,
+        },
+        ObjectiveStatus {
+            label: "Reach positive infrastructure ROI",
+            complete: client.capital_invested > 0
+                && client.operating_profit >= i128::from(client.capital_invested),
         },
     ]
 }
@@ -1014,6 +1073,11 @@ fn reset_scenario(
     client.blocked_attacks = 0;
     client.successful_failovers = 0;
     client.outage_losses = 0;
+    client.capital_invested = 0;
+    client.total_revenue = 0;
+    client.operating_costs = 0;
+    client.operating_cost_shortfall = 0;
+    client.operating_profit = 0;
 
     tool.selected = ServiceKind::ApplicationServer;
     tool.hovered = None;
@@ -1077,6 +1141,28 @@ fn scale_for_state(state: ServiceState, elapsed: f32) -> f32 {
         ServiceState::UnderConstruction { .. } => 0.94 + elapsed.sin().abs() * 0.06,
         ServiceState::Disrupted { .. } => 0.9 + elapsed.sin().abs() * 0.1,
     }
+}
+
+fn roi_percent(operating_profit: i128, capital_invested: u64) -> Option<f64> {
+    if capital_invested == 0 {
+        return None;
+    }
+    Some((operating_profit - i128::from(capital_invested)) as f64 / capital_invested as f64 * 100.0)
+}
+
+fn economics_text(client: &ClientSimulation) -> String {
+    let roi = roi_percent(client.operating_profit, client.capital_invested)
+        .map_or_else(|| "n/a".to_owned(), |roi| format!("{roi:.1}%"));
+    format!(
+        "ECONOMICS\n\nRevenue         {:>8}\nOperating costs {:>8}\nOutage losses   {:>8}\nOp. profit      {:>8}\nCapital invested{:>8}\nUnpaid costs    {:>8}\nROI             {:>8}",
+        client.total_revenue,
+        client.operating_costs,
+        client.outage_losses,
+        client.operating_profit,
+        client.capital_invested,
+        client.operating_cost_shortfall,
+        roi,
+    )
 }
 
 fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> String {
@@ -1431,8 +1517,15 @@ mod tests {
             .expect("third test connection is affordable");
 
         let mut total_served = 0;
+        let mut total_revenue = 0;
+        let mut operating_costs = 0;
+        let mut operating_profit = 0;
         for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
-            total_served += simulation.advance().served;
+            let report = simulation.advance();
+            total_served += report.served;
+            total_revenue += report.revenue;
+            operating_costs += report.operating_cost;
+            operating_profit += report.net_income;
         }
         let mut client = ClientSimulation {
             simulation,
@@ -1443,15 +1536,25 @@ mod tests {
             blocked_attacks: 0,
             successful_failovers: 0,
             outage_losses: 0,
+            capital_invested: 380,
+            total_revenue,
+            operating_costs,
+            operating_cost_shortfall: 0,
+            operating_profit,
         };
         let objectives = objective_statuses(&client);
         assert!(objectives[..5].iter().all(|objective| objective.complete));
         assert!(!objectives[5].complete);
         assert!(!objectives[6].complete);
+        assert!(!objectives[7].complete);
 
         while client.simulation.tick().number() < CYBER_ATTACK_INTERVAL {
             let report = client.simulation.advance();
             client.total_served += report.served;
+            client.total_revenue += report.revenue;
+            client.operating_costs += report.operating_cost;
+            client.operating_cost_shortfall += report.operating_cost_shortfall;
+            client.operating_profit += report.net_income;
             if report.cyberattack.is_some_and(|attack| attack.blocked) {
                 client.blocked_attacks += 1;
             }
@@ -1501,12 +1604,16 @@ mod tests {
             },
             ObjectiveStatus {
                 label: "seven",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "eight",
                 complete: false,
             },
         ];
         assert_eq!(
             apply_objective_progress(&mut progress, partial),
-            ProgressEvent::Completed(vec!["one", "two", "three", "four", "five", "six"])
+            ProgressEvent::Completed(vec!["one", "two", "three", "four", "five", "six", "seven"])
         );
         assert_eq!(
             apply_objective_progress(&mut progress, partial),
@@ -1597,6 +1704,11 @@ mod tests {
             blocked_attacks: 0,
             successful_failovers: 1,
             outage_losses: 50,
+            capital_invested: 0,
+            total_revenue: 0,
+            operating_costs: 0,
+            operating_cost_shortfall: 0,
+            operating_profit: 0,
         };
         let mut progress = GameProgress::new();
         let notification =
@@ -1624,6 +1736,11 @@ mod tests {
             blocked_attacks: 3,
             successful_failovers: 2,
             outage_losses: 400,
+            capital_invested: 500,
+            total_revenue: 1_000,
+            operating_costs: 200,
+            operating_cost_shortfall: 10,
+            operating_profit: 400,
         };
         let mut tool = BuildTool {
             selected: ServiceKind::InternetGateway,
@@ -1649,6 +1766,11 @@ mod tests {
         assert_eq!(client.blocked_attacks, 0);
         assert_eq!(client.successful_failovers, 0);
         assert_eq!(client.outage_losses, 0);
+        assert_eq!(client.capital_invested, 0);
+        assert_eq!(client.total_revenue, 0);
+        assert_eq!(client.operating_costs, 0);
+        assert_eq!(client.operating_cost_shortfall, 0);
+        assert_eq!(client.operating_profit, 0);
         assert_eq!(tool.selected, ServiceKind::ApplicationServer);
         assert!(!tool.connecting);
         assert_eq!(tool.connection_from, None);
@@ -1670,6 +1792,11 @@ mod tests {
             blocked_attacks: 0,
             successful_failovers: 0,
             outage_losses: 0,
+            capital_invested: 0,
+            total_revenue: 0,
+            operating_costs: 0,
+            operating_cost_shortfall: 0,
+            operating_profit: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1689,6 +1816,40 @@ mod tests {
     }
 
     #[test]
+    fn economics_report_distinguishes_profit_capital_and_roi() {
+        assert_eq!(roi_percent(0, 0), None);
+        assert_eq!(roi_percent(50, 100), Some(-50.0));
+        assert_eq!(roi_percent(100, 100), Some(0.0));
+        assert_eq!(roi_percent(150, 100), Some(50.0));
+
+        let scenario = create_demo_scenario().expect("demo scenario is valid");
+        let client = ClientSimulation {
+            simulation: scenario.simulation,
+            last_report: None,
+            tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            paused: false,
+            total_served: 0,
+            blocked_attacks: 0,
+            successful_failovers: 0,
+            outage_losses: 25,
+            capital_invested: 100,
+            total_revenue: 250,
+            operating_costs: 75,
+            operating_cost_shortfall: 5,
+            operating_profit: 150,
+        };
+
+        let text = economics_text(&client);
+        assert!(text.contains("Revenue              250"));
+        assert!(text.contains("Operating costs       75"));
+        assert!(text.contains("Outage losses         25"));
+        assert!(text.contains("Op. profit           150"));
+        assert!(text.contains("Capital invested     100"));
+        assert!(text.contains("Unpaid costs           5"));
+        assert!(text.contains("ROI                50.0%"));
+    }
+
+    #[test]
     fn metrics_describe_the_selected_connection_source() {
         let scenario = create_demo_scenario().expect("demo scenario is valid");
         let source = scenario.simulation.services()[0].id();
@@ -1701,6 +1862,11 @@ mod tests {
             blocked_attacks: 0,
             successful_failovers: 0,
             outage_losses: 0,
+            capital_invested: 0,
+            total_revenue: 0,
+            operating_costs: 0,
+            operating_cost_shortfall: 0,
+            operating_profit: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1732,12 +1898,18 @@ mod tests {
             blocked_attacks: 0,
             successful_failovers: 0,
             outage_losses: 0,
+            capital_invested: 0,
+            total_revenue: 0,
+            operating_costs: 0,
+            operating_cost_shortfall: 0,
+            operating_profit: 0,
         };
 
         let text = inspection_text(&client, inspected).expect("the inspected service exists");
         assert!(text.contains("Application Server #3"));
         assert!(text.contains("State         operational"));
         assert!(text.contains("Capacity      100 req/tick"));
+        assert!(text.contains("Run cost      8/tick"));
         assert!(text.contains("Links in/out  1/0"));
         assert!(text.contains("Flow in/out   100/0"));
     }
