@@ -5,6 +5,7 @@ mod command;
 mod economy;
 mod infrastructure;
 mod map;
+mod messaging;
 mod network;
 mod routing;
 mod security;
@@ -16,8 +17,8 @@ pub use clock::Tick;
 pub use command::{CommandError, CommandOutcome, GameCommand, UpgradeError};
 pub use economy::{Budget, BudgetError, OUTAGE_PENALTY_PER_DROPPED_REQUEST};
 pub use infrastructure::{
-    InfrastructureCategory, Service, ServiceId, ServiceKind, ServiceProfile, ServiceRole,
-    ServiceState, ServiceTier,
+    InfrastructureCategory, MessagingMode, Service, ServiceId, ServiceKind, ServiceProfile,
+    ServiceRole, ServiceState, ServiceTier,
 };
 pub use map::{
     Footprint, GridMap, GridPosition, MapOccupant, MapSize, MapSizeError, PlacementError,

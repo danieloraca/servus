@@ -37,6 +37,9 @@ space-efficient at scale, while multiple Starter instances provide safer redunda
 | Relational Database | 80 / 14 | 200 / 24 / 150 | 480 / 42 / 300 |
 | Key-Value Store | 160 / 9 | 420 / 15 / 100 | 1,000 / 25 / 210 |
 | Cache | 220 / 6 | 550 / 10 / 55 | 1,300 / 17 / 115 |
+| Message Queue | 120 / 5 | 300 / 8 / 70 | 750 / 14 / 150 |
+| Pub/Sub Topic | 200 / 7 | 500 / 11 / 90 | 1,200 / 19 / 180 |
+| Event Bus | 150 / 10 | 400 / 16 / 120 | 1,000 / 27 / 240 |
 
 The first data-services pack introduces three different scaling shapes. A Relational Database is
 expensive, slow to construct, and occupies 2×2 tiles; a Key-Value Store trades richer structure for
@@ -49,10 +52,16 @@ Key-Value Store becomes stateful, and the store's capacity limits completed requ
 If a configured database or required cache path is unavailable, the stateful workload cannot
 silently fall back to stateless operation.
 
+The messaging pack turns completed web requests into asynchronous work. Wire
+`App → Queue → Worker` to retain work when workers are unavailable; queues store up to ten ticks
+of their tier throughput. `App → Topic → Worker A + Worker B` sends a copy to every subscriber,
+while an Event Bus distributes each event once across its available consumers. Processed messages
+produce additional revenue; published, processed, queued, and dropped totals appear in the client.
+
 The Bevy client starts a playable empty-map scenario and renders infrastructure states, directed
 connections, live simulation metrics, and objectives in a native window. A separate deterministic
 three-tick ASCII scenario remains available for headless debugging.
-The current learning scenario starts with 1,000 credits, enough to experiment with one Starter
+The current learning scenario starts with 1,500 credits, enough to experiment with one Starter
 instance of every infrastructure type while retaining some capital for connections and operations.
 Incoming traffic now requires a directed, fully operational path from an Internet Gateway to an
 Application Server. Network links have their own construction cost and are shown in the terminal

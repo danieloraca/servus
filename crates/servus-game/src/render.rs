@@ -16,6 +16,12 @@ const KEY_VALUE_STORE_BUILDING: char = 'k';
 const KEY_VALUE_STORE_OPERATIONAL: char = 'K';
 const CACHE_BUILDING: char = 'c';
 const CACHE_OPERATIONAL: char = 'C';
+const MESSAGE_QUEUE_BUILDING: char = 'q';
+const MESSAGE_QUEUE_OPERATIONAL: char = 'Q';
+const PUB_SUB_TOPIC_BUILDING: char = 'p';
+const PUB_SUB_TOPIC_OPERATIONAL: char = 'P';
+const EVENT_BUS_BUILDING: char = 'e';
+const EVENT_BUS_OPERATIONAL: char = 'E';
 const EMPTY_TILE: char = '.';
 const INVALID_OCCUPANT: char = '?';
 
@@ -60,18 +66,22 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
     write_border(&mut output, row_label_width, size.width());
 
     output.push_str(
-        "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, r/R=SQL DB, k/K=Key-Value, c/C=Cache, !=disrupted\n",
+        "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, r/R=SQL DB, k/K=Key-Value, c/C=Cache, q/Q=Queue, p/P=Topic, e/E=Event Bus, !=disrupted\n",
     );
     write_network_links(&mut output, simulation);
     if let Some(report) = report {
         writeln!(
             output,
-            "Traffic: received={} | served={} | dropped={} | db_requests={} | cache_hits={} | revenue={} | opex={} | net={} | outage_penalty={} | failover={}",
+            "Traffic: received={} | served={} | dropped={} | db_requests={} | cache_hits={} | messages={}/{}/{} queued | msg_dropped={} | revenue={} | opex={} | net={} | outage_penalty={} | failover={}",
             report.received,
             report.served,
             report.dropped,
             report.database_requests,
             report.cache_hits,
+            report.messages_published,
+            report.messages_processed,
+            report.messages_queued,
+            report.messages_dropped,
             report.revenue,
             report.operating_cost,
             report.net_income,
@@ -120,6 +130,16 @@ fn service_symbol(service: &Service) -> char {
         (ServiceKind::KeyValueStore, ServiceState::Operational) => KEY_VALUE_STORE_OPERATIONAL,
         (ServiceKind::Cache, ServiceState::UnderConstruction { .. }) => CACHE_BUILDING,
         (ServiceKind::Cache, ServiceState::Operational) => CACHE_OPERATIONAL,
+        (ServiceKind::MessageQueue, ServiceState::UnderConstruction { .. }) => {
+            MESSAGE_QUEUE_BUILDING
+        }
+        (ServiceKind::MessageQueue, ServiceState::Operational) => MESSAGE_QUEUE_OPERATIONAL,
+        (ServiceKind::PubSubTopic, ServiceState::UnderConstruction { .. }) => {
+            PUB_SUB_TOPIC_BUILDING
+        }
+        (ServiceKind::PubSubTopic, ServiceState::Operational) => PUB_SUB_TOPIC_OPERATIONAL,
+        (ServiceKind::EventBus, ServiceState::UnderConstruction { .. }) => EVENT_BUS_BUILDING,
+        (ServiceKind::EventBus, ServiceState::Operational) => EVENT_BUS_OPERATIONAL,
     }
 }
 
@@ -216,7 +236,7 @@ mod tests {
                 "0 |...|\n",
                 "1 |...|\n",
                 "  +---+\n",
-                "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, r/R=SQL DB, k/K=Key-Value, c/C=Cache, !=disrupted\n",
+                "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, r/R=SQL DB, k/K=Key-Value, c/C=Cache, q/Q=Queue, p/P=Topic, e/E=Event Bus, !=disrupted\n",
                 "Links: none\n",
                 "Traffic: awaiting first tick\n",
             )

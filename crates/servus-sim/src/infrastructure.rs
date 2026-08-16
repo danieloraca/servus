@@ -27,6 +27,9 @@ pub enum ServiceKind {
     RelationalDatabase,
     KeyValueStore,
     Cache,
+    MessageQueue,
+    PubSubTopic,
+    EventBus,
 }
 
 /// Data-driven balance values for one constructible infrastructure type.
@@ -41,6 +44,7 @@ pub struct ServiceProfile {
     pub footprint: Footprint,
     pub role: ServiceRole,
     pub category: InfrastructureCategory,
+    pub messaging: Option<MessagingMode>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -83,6 +87,14 @@ pub enum ServiceRole {
     Application,
     PersistentStore,
     Cache,
+    Messaging,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MessagingMode {
+    Queue,
+    FanOut,
+    Routed,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -135,7 +147,7 @@ impl fmt::Display for ServiceTier {
 }
 
 impl ServiceKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::InternetGateway,
         Self::Firewall,
         Self::LoadBalancer,
@@ -143,9 +155,12 @@ impl ServiceKind {
         Self::RelationalDatabase,
         Self::KeyValueStore,
         Self::Cache,
+        Self::MessageQueue,
+        Self::PubSubTopic,
+        Self::EventBus,
     ];
 
-    const PROFILES: [ServiceProfile; 7] = [
+    const PROFILES: [ServiceProfile; 10] = [
         ServiceProfile {
             build_cost: 50,
             operating_costs: [2, 3, 5],
@@ -156,6 +171,7 @@ impl ServiceKind {
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Ingress,
             category: InfrastructureCategory::Network,
+            messaging: None,
         },
         ServiceProfile {
             build_cost: 125,
@@ -167,6 +183,7 @@ impl ServiceKind {
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Transit,
             category: InfrastructureCategory::Security,
+            messaging: None,
         },
         ServiceProfile {
             build_cost: 75,
@@ -178,6 +195,7 @@ impl ServiceKind {
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Transit,
             category: InfrastructureCategory::Network,
+            messaging: None,
         },
         ServiceProfile {
             build_cost: 100,
@@ -189,6 +207,7 @@ impl ServiceKind {
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Application,
             category: InfrastructureCategory::Compute,
+            messaging: None,
         },
         ServiceProfile {
             build_cost: 180,
@@ -200,6 +219,7 @@ impl ServiceKind {
             footprint: Footprint::new(2, 2),
             role: ServiceRole::PersistentStore,
             category: InfrastructureCategory::Data,
+            messaging: None,
         },
         ServiceProfile {
             build_cost: 120,
@@ -211,6 +231,7 @@ impl ServiceKind {
             footprint: Footprint::new(1, 1),
             role: ServiceRole::PersistentStore,
             category: InfrastructureCategory::Data,
+            messaging: None,
         },
         ServiceProfile {
             build_cost: 70,
@@ -222,6 +243,43 @@ impl ServiceKind {
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Cache,
             category: InfrastructureCategory::Data,
+            messaging: None,
+        },
+        ServiceProfile {
+            build_cost: 90,
+            operating_costs: [5, 8, 14],
+            upgrade_costs: [None, Some(70), Some(150)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [120, 300, 750],
+            construction_ticks: 2,
+            footprint: Footprint::new(1, 1),
+            role: ServiceRole::Messaging,
+            category: InfrastructureCategory::Messaging,
+            messaging: Some(MessagingMode::Queue),
+        },
+        ServiceProfile {
+            build_cost: 110,
+            operating_costs: [7, 11, 19],
+            upgrade_costs: [None, Some(90), Some(180)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [200, 500, 1_200],
+            construction_ticks: 2,
+            footprint: Footprint::new(1, 1),
+            role: ServiceRole::Messaging,
+            category: InfrastructureCategory::Messaging,
+            messaging: Some(MessagingMode::FanOut),
+        },
+        ServiceProfile {
+            build_cost: 150,
+            operating_costs: [10, 16, 27],
+            upgrade_costs: [None, Some(120), Some(240)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [150, 400, 1_000],
+            construction_ticks: 3,
+            footprint: Footprint::new(1, 1),
+            role: ServiceRole::Messaging,
+            category: InfrastructureCategory::Messaging,
+            messaging: Some(MessagingMode::Routed),
         },
     ];
 
@@ -283,6 +341,11 @@ impl ServiceKind {
     #[must_use]
     pub const fn category(self) -> InfrastructureCategory {
         self.profile().category
+    }
+
+    #[must_use]
+    pub const fn messaging_mode(self) -> Option<MessagingMode> {
+        self.profile().messaging
     }
 
     #[must_use]
@@ -591,6 +654,9 @@ mod tests {
                 ServiceKind::RelationalDatabase,
                 ServiceKind::KeyValueStore,
                 ServiceKind::Cache,
+                ServiceKind::MessageQueue,
+                ServiceKind::PubSubTopic,
+                ServiceKind::EventBus,
             ]
         );
     }
@@ -637,6 +703,27 @@ mod tests {
             ]
             .into_iter()
             .all(|kind| kind.category() == InfrastructureCategory::Data)
+        );
+        assert!(
+            [
+                ServiceKind::MessageQueue,
+                ServiceKind::PubSubTopic,
+                ServiceKind::EventBus,
+            ]
+            .into_iter()
+            .all(|kind| kind.category() == InfrastructureCategory::Messaging)
+        );
+        assert_eq!(
+            ServiceKind::MessageQueue.messaging_mode(),
+            Some(MessagingMode::Queue)
+        );
+        assert_eq!(
+            ServiceKind::PubSubTopic.messaging_mode(),
+            Some(MessagingMode::FanOut)
+        );
+        assert_eq!(
+            ServiceKind::EventBus.messaging_mode(),
+            Some(MessagingMode::Routed)
         );
     }
 

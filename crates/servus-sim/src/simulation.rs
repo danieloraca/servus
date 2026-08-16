@@ -18,6 +18,7 @@ pub struct Simulation {
     next_service_id: u64,
     solutions: Vec<Solution>,
     next_solution_id: u64,
+    message_backlogs: Vec<crate::messaging::QueueBacklog>,
 }
 
 impl Simulation {
@@ -33,6 +34,7 @@ impl Simulation {
             next_service_id: 1,
             solutions: Vec::new(),
             next_solution_id: 1,
+            message_backlogs: Vec::new(),
         }
     }
 
@@ -83,6 +85,14 @@ impl Simulation {
     #[must_use]
     pub fn solution(&self, id: SolutionId) -> Option<&Solution> {
         self.solutions.iter().find(|solution| solution.id() == id)
+    }
+
+    #[must_use]
+    pub fn queue_backlog(&self, id: ServiceId) -> u64 {
+        self.message_backlogs
+            .iter()
+            .find(|backlog| backlog.queue == id)
+            .map_or(0, |backlog| backlog.messages)
     }
 
     pub fn apply(&mut self, command: GameCommand) -> Result<CommandOutcome, CommandError> {
@@ -254,7 +264,16 @@ impl Simulation {
         let routing = crate::routing::route_requests(received, &self.services, &self.network);
         let served = routing.served;
         let dropped = received - served;
-        let revenue = served.saturating_mul(REVENUE_PER_SERVED_REQUEST);
+        let messaging = crate::messaging::process_messages(
+            &self.services,
+            &self.network,
+            &routing.link_traffic,
+            &mut self.message_backlogs,
+        );
+        let async_revenue = messaging.processed;
+        let revenue = served
+            .saturating_mul(REVENUE_PER_SERVED_REQUEST)
+            .saturating_add(async_revenue);
         self.budget.credit(revenue);
         let disruption_active = self
             .services
@@ -275,21 +294,28 @@ impl Simulation {
         let net_income =
             i128::from(revenue) - i128::from(outage_penalty) - i128::from(assessed_operating_cost);
 
+        let mut link_traffic = routing.link_traffic;
+        link_traffic.extend(messaging.link_traffic);
         TickReport {
             tick: self.tick,
             received,
             served,
             dropped,
             revenue,
+            async_revenue,
             outage_penalty,
             failover_active,
             operating_cost: assessed_operating_cost,
             operating_cost_shortfall,
             net_income,
             completed_services,
-            link_traffic: routing.link_traffic,
+            link_traffic,
             database_requests: routing.database_requests,
             cache_hits: routing.cache_hits,
+            messages_published: messaging.published,
+            messages_processed: messaging.processed,
+            messages_queued: messaging.queued,
+            messages_dropped: messaging.dropped,
             cyberattack,
         }
     }
@@ -1167,5 +1193,53 @@ mod tests {
             }))
         );
         assert_eq!(simulation, before_failed_command);
+    }
+
+    #[test]
+    fn processed_queue_work_adds_async_revenue_and_link_traffic() {
+        let mut simulation = Simulation::new(2_000, 100, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let producer = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+        let queue = build(&mut simulation, ServiceKind::MessageQueue, position(2, 0));
+        let worker = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(3, 0),
+        );
+        for (from, to) in [(gateway, producer), (producer, queue), (queue, worker)] {
+            simulation
+                .apply(GameCommand::ConnectServices { from, to })
+                .expect("the messaging links are affordable");
+        }
+
+        simulation.advance();
+        simulation.advance();
+        let report = simulation.advance();
+
+        assert_eq!((report.served, report.messages_published), (100, 100));
+        assert_eq!(
+            (report.messages_processed, report.messages_queued),
+            (100, 0)
+        );
+        assert_eq!((report.async_revenue, report.revenue), (100, 200));
+        assert!(report.link_traffic.contains(&crate::LinkTraffic {
+            from: producer,
+            to: queue,
+            requests: 100,
+        }));
+        assert!(report.link_traffic.contains(&crate::LinkTraffic {
+            from: queue,
+            to: worker,
+            requests: 100,
+        }));
+        assert_eq!(simulation.queue_backlog(queue), 0);
     }
 }

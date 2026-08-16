@@ -2036,6 +2036,18 @@ fn visual_style(kind: ServiceKind) -> VisualStyle {
             abbreviation: "CCH",
             color: [0.95, 0.76, 0.18],
         },
+        ServiceKind::MessageQueue => VisualStyle {
+            abbreviation: "QUE",
+            color: [0.08, 0.72, 0.72],
+        },
+        ServiceKind::PubSubTopic => VisualStyle {
+            abbreviation: "TOP",
+            color: [0.9, 0.34, 0.72],
+        },
+        ServiceKind::EventBus => VisualStyle {
+            abbreviation: "EVT",
+            color: [0.96, 0.43, 0.2],
+        },
     }
 }
 
@@ -2048,6 +2060,9 @@ fn service_kind_name(kind: ServiceKind) -> &'static str {
         ServiceKind::RelationalDatabase => "Relational Database",
         ServiceKind::KeyValueStore => "Key-Value Store",
         ServiceKind::Cache => "Cache",
+        ServiceKind::MessageQueue => "Message Queue",
+        ServiceKind::PubSubTopic => "Pub/Sub Topic",
+        ServiceKind::EventBus => "Event Bus",
     }
 }
 
@@ -2076,6 +2091,9 @@ fn selection_feedback(kind: ServiceKind) -> String {
         ServiceKind::RelationalDatabase => "connect App → SQL for persistent state",
         ServiceKind::KeyValueStore => "connect App → KV for scalable persistent state",
         ServiceKind::Cache => "connect App → Cache → Database for 50% cache hits",
+        ServiceKind::MessageQueue => "connect App → Queue → worker; work waits safely",
+        ServiceKind::PubSubTopic => "connect App → Topic → workers; every worker gets a copy",
+        ServiceKind::EventBus => "connect App → Event Bus → workers; each event routes once",
     };
     format!("Selected {} — {hint}", service_kind_name(kind))
 }
@@ -2156,6 +2174,10 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let dropped = report.map_or(0, |report| report.dropped);
     let database_requests = report.map_or(0, |report| report.database_requests);
     let cache_hits = report.map_or(0, |report| report.cache_hits);
+    let messages_published = report.map_or(0, |report| report.messages_published);
+    let messages_processed = report.map_or(0, |report| report.messages_processed);
+    let messages_queued = report.map_or(0, |report| report.messages_queued);
+    let messages_dropped = report.map_or(0, |report| report.messages_dropped);
     let mode = if tool.foundation_mode {
         format!(
             "Mode: Build {} ({}c / {} floors)",
@@ -2192,7 +2214,7 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let objectives = objectives_text(client);
     let build_menu = build_menu_text(tool.category);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nDB requests  {:>6}\nCache hits   {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nCATALOG: {}\n{build_menu}Tab  Next category\nB  Foundation / cycle size\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nDB requests  {:>6}\nCache hits   {:>6}\nMsg published{:>6}\nMsg processed{:>6}\nMsg queued   {:>6}\nMsg dropped  {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nCATALOG: {}\n{build_menu}Tab  Next category\nB  Foundation / cycle size\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -2200,6 +2222,10 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         dropped,
         database_requests,
         cache_hits,
+        messages_published,
+        messages_processed,
+        messages_queued,
+        messages_dropped,
         client.total_served,
         client.blocked_attacks,
         client.successful_failovers,
@@ -2546,6 +2572,10 @@ mod tests {
         );
         assert_eq!(
             next_populated_category(InfrastructureCategory::Data),
+            InfrastructureCategory::Messaging
+        );
+        assert_eq!(
+            next_populated_category(InfrastructureCategory::Messaging),
             InfrastructureCategory::Network
         );
         for kind in ServiceKind::ALL {
@@ -2564,6 +2594,13 @@ mod tests {
     fn data_service_selection_explains_directional_wiring() {
         assert!(selection_feedback(ServiceKind::RelationalDatabase).contains("App → SQL"));
         assert!(selection_feedback(ServiceKind::Cache).contains("App → Cache → Database"));
+    }
+
+    #[test]
+    fn messaging_selection_explains_each_delivery_model() {
+        assert!(selection_feedback(ServiceKind::MessageQueue).contains("waits safely"));
+        assert!(selection_feedback(ServiceKind::PubSubTopic).contains("every worker"));
+        assert!(selection_feedback(ServiceKind::EventBus).contains("routes once"));
     }
 
     #[test]

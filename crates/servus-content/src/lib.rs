@@ -61,6 +61,21 @@ impl ContentCatalog {
                     display_name: "Cache".to_owned(),
                     description: "Fast temporary data. Connect App → Cache → Database to absorb 50% of reads. Similar to ElastiCache, Azure Managed Redis, or Memorystore.".to_owned(),
                 },
+                ServiceDefinition {
+                    kind: ServiceKind::MessageQueue,
+                    display_name: "Message Queue".to_owned(),
+                    description: "Buffers background work until a consumer can process it. Similar to Amazon SQS, Azure Service Bus queues, or Google Cloud Tasks.".to_owned(),
+                },
+                ServiceDefinition {
+                    kind: ServiceKind::PubSubTopic,
+                    display_name: "Pub/Sub Topic".to_owned(),
+                    description: "Publishes a copy of every event to every connected consumer. Similar to Amazon SNS, Azure Service Bus topics, or Google Cloud Pub/Sub.".to_owned(),
+                },
+                ServiceDefinition {
+                    kind: ServiceKind::EventBus,
+                    display_name: "Event Bus".to_owned(),
+                    description: "Routes each event to one available consumer path without duplicating it. Similar to Amazon EventBridge, Azure Event Grid, or Google Eventarc.".to_owned(),
+                },
             ],
         }
     }

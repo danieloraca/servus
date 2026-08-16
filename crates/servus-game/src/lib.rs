@@ -19,7 +19,7 @@ pub const DEMO_GATEWAY_POSITION: GridPosition = GridPosition::new(1, 4);
 pub const DEMO_LOAD_BALANCER_POSITION: GridPosition = GridPosition::new(3, 4);
 pub const DEMO_SERVER_ONE_POSITION: GridPosition = GridPosition::new(5, 3);
 pub const DEMO_SERVER_TWO_POSITION: GridPosition = GridPosition::new(5, 5);
-pub const NEW_GAME_STARTING_CREDITS: u64 = 1_000;
+pub const NEW_GAME_STARTING_CREDITS: u64 = 1_500;
 pub const NEW_GAME_REQUESTS_PER_TICK: u64 = 100;
 pub const NEW_GAME_MAP_WIDTH: u16 = 8;
 pub const NEW_GAME_MAP_HEIGHT: u16 = 8;
@@ -263,6 +263,9 @@ mod tests {
             (ServiceKind::RelationalDatabase, GridPosition::new(4, 0)),
             (ServiceKind::KeyValueStore, GridPosition::new(6, 0)),
             (ServiceKind::Cache, GridPosition::new(7, 0)),
+            (ServiceKind::MessageQueue, GridPosition::new(0, 2)),
+            (ServiceKind::PubSubTopic, GridPosition::new(1, 2)),
+            (ServiceKind::EventBus, GridPosition::new(2, 2)),
         ];
 
         for (kind, position) in placements {
@@ -271,7 +274,7 @@ mod tests {
         }
 
         assert_eq!(simulation.services().len(), ServiceKind::ALL.len());
-        assert_eq!(simulation.budget().credits(), 280);
+        assert_eq!(simulation.budget().credits(), 430);
     }
 
     #[test]

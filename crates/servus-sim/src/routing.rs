@@ -90,6 +90,11 @@ pub(crate) fn route_requests(
         let Some(to) = service_index(services, link.to) else {
             continue;
         };
+        if services[from].kind().messaging_mode().is_some()
+            || services[to].kind().messaging_mode().is_some()
+        {
+            continue;
+        }
         let from_node = service_output(from);
         let edge_index = add_edge(&mut graph, from_node, service_input(to), demand);
         tracked_links.push((*link, from, to, from_node, edge_index));
@@ -159,6 +164,13 @@ fn is_reachable(
     let mut queue = VecDeque::from([from]);
     while let Some(current) = queue.pop_front() {
         for link in network.links().iter().filter(|link| link.from == current) {
+            if service(services, current)
+                .is_some_and(|service| service.kind().messaging_mode().is_some())
+                || service(services, link.to)
+                    .is_some_and(|service| service.kind().messaging_mode().is_some())
+            {
+                continue;
+            }
             if link.to == target {
                 return true;
             }
@@ -170,6 +182,10 @@ fn is_reachable(
         }
     }
     false
+}
+
+fn service(services: &[Service], id: ServiceId) -> Option<&Service> {
+    services.iter().find(|service| service.id() == id)
 }
 
 fn maximum_flow(graph: &mut [Vec<FlowEdge>], source: usize, sink: usize, limit: u64) -> u64 {
@@ -501,6 +517,22 @@ mod tests {
         connect(&mut network, 1, 2);
 
         assert_eq!(route_requests(100, &services, &network).served, 0);
+    }
+
+    #[test]
+    fn messaging_links_do_not_become_synchronous_request_paths() {
+        let services = vec![
+            operational_service(1, ServiceKind::InternetGateway),
+            operational_service(2, ServiceKind::MessageQueue),
+            operational_service(3, ServiceKind::ApplicationServer),
+        ];
+        let mut network = Network::default();
+        connect(&mut network, 1, 2);
+        connect(&mut network, 2, 3);
+
+        let result = route_requests(100, &services, &network);
+        assert_eq!(result.served, 0);
+        assert!(result.link_traffic.is_empty());
     }
 
     #[test]
