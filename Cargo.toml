@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "crates/servus-content",
+    "crates/servus-game",
+    "crates/servus-sim",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

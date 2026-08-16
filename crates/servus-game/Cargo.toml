@@ -1,0 +1,11 @@
+[package]
+name = "servus-game"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+servus-content = { path = "../servus-content" }
+servus-sim = { path = "../servus-sim" }
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "servus-content"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+servus-sim = { path = "../servus-sim" }
+
+[lints]
+workspace = true
