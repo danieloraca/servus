@@ -1143,6 +1143,9 @@ fn build_service(
         CommandOutcome::ServiceUpgradeStarted { .. } => {
             unreachable!("a build command cannot produce an upgrade outcome")
         }
+        CommandOutcome::SolutionBuilt { .. } | CommandOutcome::ServiceInstalled { .. } => {
+            unreachable!("a legacy build command cannot produce a solution outcome")
+        }
     }
 }
 
@@ -1190,6 +1193,9 @@ fn try_connection_click(
         CommandOutcome::ServiceUpgradeStarted { .. } => {
             unreachable!("a network command cannot produce an upgrade outcome")
         }
+        CommandOutcome::SolutionBuilt { .. } | CommandOutcome::ServiceInstalled { .. } => {
+            unreachable!("a network command cannot produce a solution outcome")
+        }
     }
 }
 
@@ -1228,7 +1234,9 @@ fn try_upgrade_service(
         }
         CommandOutcome::ServiceBuilt { .. }
         | CommandOutcome::ServicesConnected { .. }
-        | CommandOutcome::ServicesDisconnected { .. } => {
+        | CommandOutcome::ServicesDisconnected { .. }
+        | CommandOutcome::SolutionBuilt { .. }
+        | CommandOutcome::ServiceInstalled { .. } => {
             unreachable!("an upgrade command must produce an upgrade outcome")
         }
     }

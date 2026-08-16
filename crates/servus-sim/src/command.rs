@@ -2,12 +2,20 @@ use std::error::Error;
 use std::fmt;
 
 use crate::{
-    BudgetError, GridPosition, NetworkError, PlacementError, ServiceId, ServiceKind, ServiceState,
-    ServiceTier,
+    BudgetError, FoundationKind, GridPosition, NetworkError, PlacementError, ServiceId,
+    ServiceKind, ServiceState, ServiceTier, SolutionError, SolutionId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GameCommand {
+    BuildSolution {
+        foundation: FoundationKind,
+        position: GridPosition,
+    },
+    InstallService {
+        solution: SolutionId,
+        kind: ServiceKind,
+    },
     BuildService {
         kind: ServiceKind,
         position: GridPosition,
@@ -27,6 +35,16 @@ pub enum GameCommand {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandOutcome {
+    SolutionBuilt {
+        id: SolutionId,
+        foundation: FoundationKind,
+        position: GridPosition,
+    },
+    ServiceInstalled {
+        solution: SolutionId,
+        id: ServiceId,
+        kind: ServiceKind,
+    },
     ServiceBuilt {
         id: ServiceId,
         kind: ServiceKind,
@@ -80,6 +98,7 @@ pub enum CommandError {
     InvalidPlacement(PlacementError),
     InvalidNetwork(NetworkError),
     InvalidUpgrade(UpgradeError),
+    InvalidSolution(SolutionError),
 }
 
 impl fmt::Display for CommandError {
@@ -89,6 +108,7 @@ impl fmt::Display for CommandError {
             Self::InvalidPlacement(error) => error.fmt(formatter),
             Self::InvalidNetwork(error) => error.fmt(formatter),
             Self::InvalidUpgrade(error) => error.fmt(formatter),
+            Self::InvalidSolution(error) => error.fmt(formatter),
         }
     }
 }
@@ -100,6 +120,7 @@ impl Error for CommandError {
             Self::InvalidPlacement(error) => Some(error),
             Self::InvalidNetwork(error) => Some(error),
             Self::InvalidUpgrade(error) => Some(error),
+            Self::InvalidSolution(error) => Some(error),
         }
     }
 }

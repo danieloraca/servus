@@ -177,6 +177,9 @@ fn build_service(
         CommandOutcome::ServiceUpgradeStarted { .. } => {
             unreachable!("a build command cannot produce an upgrade outcome")
         }
+        CommandOutcome::SolutionBuilt { .. } | CommandOutcome::ServiceInstalled { .. } => {
+            unreachable!("a legacy build command cannot produce a solution outcome")
+        }
     }
 }
 

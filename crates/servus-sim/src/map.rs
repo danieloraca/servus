@@ -1,7 +1,13 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::ServiceId;
+use crate::{ServiceId, SolutionId};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MapOccupant {
+    Service(ServiceId),
+    Solution(SolutionId),
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GridPosition {
@@ -92,6 +98,10 @@ pub enum PlacementError {
         position: GridPosition,
         service_id: ServiceId,
     },
+    SolutionOccupied {
+        position: GridPosition,
+        solution_id: SolutionId,
+    },
 }
 
 impl fmt::Display for PlacementError {
@@ -121,6 +131,16 @@ impl fmt::Display for PlacementError {
                 position.y,
                 service_id.value()
             ),
+            Self::SolutionOccupied {
+                position,
+                solution_id,
+            } => write!(
+                formatter,
+                "tile ({}, {}) is occupied by solution {}",
+                position.x,
+                position.y,
+                solution_id.value()
+            ),
         }
     }
 }
@@ -130,7 +150,7 @@ impl Error for PlacementError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GridMap {
     size: MapSize,
-    occupied: Vec<Option<ServiceId>>,
+    occupied: Vec<Option<MapOccupant>>,
 }
 
 impl GridMap {
@@ -150,6 +170,22 @@ impl GridMap {
 
     #[must_use]
     pub fn service_at(&self, position: GridPosition) -> Option<ServiceId> {
+        match self.occupant_at(position) {
+            Some(MapOccupant::Service(id)) => Some(id),
+            Some(MapOccupant::Solution(_)) | None => None,
+        }
+    }
+
+    #[must_use]
+    pub fn solution_at(&self, position: GridPosition) -> Option<SolutionId> {
+        match self.occupant_at(position) {
+            Some(MapOccupant::Solution(id)) => Some(id),
+            Some(MapOccupant::Service(_)) | None => None,
+        }
+    }
+
+    #[must_use]
+    pub fn occupant_at(&self, position: GridPosition) -> Option<MapOccupant> {
         self.index(position).and_then(|index| self.occupied[index])
     }
 
@@ -171,11 +207,20 @@ impl GridMap {
         for y in position.y..end_y {
             for x in position.x..end_x {
                 let tile = GridPosition::new(x, y);
-                if let Some(service_id) = self.service_at(tile) {
-                    return Err(PlacementError::Occupied {
-                        position: tile,
-                        service_id,
-                    });
+                match self.occupant_at(tile) {
+                    Some(MapOccupant::Service(service_id)) => {
+                        return Err(PlacementError::Occupied {
+                            position: tile,
+                            service_id,
+                        });
+                    }
+                    Some(MapOccupant::Solution(solution_id)) => {
+                        return Err(PlacementError::SolutionOccupied {
+                            position: tile,
+                            solution_id,
+                        });
+                    }
+                    None => {}
                 }
             }
         }
@@ -195,7 +240,25 @@ impl GridMap {
                 let index = self
                     .index(GridPosition::new(x, y))
                     .expect("validated footprints contain only map positions");
-                self.occupied[index] = Some(service_id);
+                self.occupied[index] = Some(MapOccupant::Service(service_id));
+            }
+        }
+    }
+
+    pub(crate) fn occupy_solution(
+        &mut self,
+        position: GridPosition,
+        footprint: Footprint,
+        solution_id: SolutionId,
+    ) {
+        let end_x = position.x + footprint.width;
+        let end_y = position.y + footprint.height;
+        for y in position.y..end_y {
+            for x in position.x..end_x {
+                let index = self
+                    .index(GridPosition::new(x, y))
+                    .expect("validated footprints contain only map positions");
+                self.occupied[index] = Some(MapOccupant::Solution(solution_id));
             }
         }
     }
@@ -314,6 +377,23 @@ mod tests {
             Err(PlacementError::Occupied {
                 position: GridPosition::new(2, 1),
                 service_id,
+            })
+        );
+    }
+
+    #[test]
+    fn solution_lots_reserve_every_tile_without_masquerading_as_services() {
+        let mut map = GridMap::new(map_size(5, 5));
+        let solution = SolutionId::new(3);
+        map.occupy_solution(GridPosition::new(1, 1), Footprint::new(2, 2), solution);
+
+        assert_eq!(map.solution_at(GridPosition::new(2, 2)), Some(solution));
+        assert_eq!(map.service_at(GridPosition::new(2, 2)), None);
+        assert_eq!(
+            map.validate_placement(GridPosition::new(2, 2), Footprint::new(1, 1)),
+            Err(PlacementError::SolutionOccupied {
+                position: GridPosition::new(2, 2),
+                solution_id: solution,
             })
         );
     }

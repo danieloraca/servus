@@ -1,4 +1,4 @@
-use crate::{Footprint, GridPosition};
+use crate::{Footprint, GridPosition, SolutionId};
 use std::fmt;
 
 /// The stable identity of a constructed service.
@@ -295,6 +295,7 @@ pub struct Service {
     kind: ServiceKind,
     tier: ServiceTier,
     position: GridPosition,
+    solution: Option<SolutionId>,
     state: ServiceState,
 }
 
@@ -313,8 +314,20 @@ impl Service {
             kind,
             tier: ServiceTier::Starter,
             position,
+            solution: None,
             state,
         }
+    }
+
+    pub(crate) const fn new_in_solution(
+        id: ServiceId,
+        kind: ServiceKind,
+        position: GridPosition,
+        solution: SolutionId,
+    ) -> Self {
+        let mut service = Self::new(id, kind, position);
+        service.solution = Some(solution);
+        service
     }
 
     #[must_use]
@@ -348,6 +361,11 @@ impl Service {
     #[must_use]
     pub const fn position(self) -> GridPosition {
         self.position
+    }
+
+    #[must_use]
+    pub const fn solution(self) -> Option<SolutionId> {
+        self.solution
     }
 
     #[must_use]

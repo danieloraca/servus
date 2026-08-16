@@ -1,7 +1,7 @@
 use crate::{
     Budget, CommandError, CommandOutcome, GameCommand, GridMap, MapSize, NETWORK_LINK_COST,
     Network, NetworkError, OUTAGE_PENALTY_PER_DROPPED_REQUEST, Service, ServiceId, ServiceState,
-    Tick, TickReport, Traffic, UpgradeError,
+    Solution, SolutionError, SolutionId, Tick, TickReport, Traffic, UpgradeError,
 };
 
 const REVENUE_PER_SERVED_REQUEST: u64 = 1;
@@ -16,6 +16,8 @@ pub struct Simulation {
     network: Network,
     services: Vec<Service>,
     next_service_id: u64,
+    solutions: Vec<Solution>,
+    next_solution_id: u64,
 }
 
 impl Simulation {
@@ -29,6 +31,8 @@ impl Simulation {
             network: Network::default(),
             services: Vec::new(),
             next_service_id: 1,
+            solutions: Vec::new(),
+            next_solution_id: 1,
         }
     }
 
@@ -71,8 +75,68 @@ impl Simulation {
         self.services.iter().find(|service| service.id() == id)
     }
 
+    #[must_use]
+    pub fn solutions(&self) -> &[Solution] {
+        &self.solutions
+    }
+
+    #[must_use]
+    pub fn solution(&self, id: SolutionId) -> Option<&Solution> {
+        self.solutions.iter().find(|solution| solution.id() == id)
+    }
+
     pub fn apply(&mut self, command: GameCommand) -> Result<CommandOutcome, CommandError> {
         match command {
+            GameCommand::BuildSolution {
+                foundation,
+                position,
+            } => {
+                let footprint = foundation.footprint();
+                self.map
+                    .validate_placement(position, footprint)
+                    .map_err(CommandError::InvalidPlacement)?;
+                self.budget
+                    .spend(foundation.build_cost())
+                    .map_err(CommandError::InsufficientBudget)?;
+
+                let id = SolutionId::new(self.next_solution_id);
+                self.next_solution_id = self.next_solution_id.saturating_add(1);
+                self.map.occupy_solution(position, footprint, id);
+                self.solutions.push(Solution::new(id, position, foundation));
+                Ok(CommandOutcome::SolutionBuilt {
+                    id,
+                    foundation,
+                    position,
+                })
+            }
+            GameCommand::InstallService { solution, kind } => {
+                let index = self
+                    .solutions
+                    .iter()
+                    .position(|candidate| candidate.id() == solution)
+                    .ok_or(CommandError::InvalidSolution(
+                        SolutionError::UnknownSolution(solution),
+                    ))?;
+                let position = self.solutions[index].position();
+                if self.solutions[index].remaining_floors() == 0 {
+                    return Err(CommandError::InvalidSolution(SolutionError::BuildingFull {
+                        solution,
+                        maximum_floors: self.solutions[index].foundation().maximum_floors(),
+                    }));
+                }
+                self.budget
+                    .spend(kind.build_cost())
+                    .map_err(CommandError::InsufficientBudget)?;
+
+                let id = ServiceId::new(self.next_service_id);
+                self.next_service_id = self.next_service_id.saturating_add(1);
+                self.solutions[index]
+                    .install(id)
+                    .expect("validated building capacity accepts the new floor");
+                self.services
+                    .push(Service::new_in_solution(id, kind, position, solution));
+                Ok(CommandOutcome::ServiceInstalled { solution, id, kind })
+            }
             GameCommand::BuildService { kind, position } => {
                 let footprint = kind.footprint();
                 self.map
@@ -233,7 +297,9 @@ impl Simulation {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BudgetError, GridPosition, PlacementError, ServiceKind, ServiceState};
+    use crate::{
+        BudgetError, FoundationKind, GridPosition, PlacementError, ServiceKind, ServiceState,
+    };
 
     use super::*;
 
@@ -260,6 +326,9 @@ mod tests {
             CommandOutcome::ServiceUpgradeStarted { .. } => {
                 panic!("a build command must produce a service")
             }
+            CommandOutcome::SolutionBuilt { .. } | CommandOutcome::ServiceInstalled { .. } => {
+                panic!("a legacy build command must produce a service")
+            }
         }
     }
 
@@ -273,6 +342,123 @@ mod tests {
             })
             .expect("test link is affordable and valid");
         (gateway, server)
+    }
+
+    #[test]
+    fn solution_foundation_holds_service_floors_without_consuming_more_city_tiles() {
+        let mut simulation = Simulation::new(2_000, 0, map_size());
+        let outcome = simulation
+            .apply(GameCommand::BuildSolution {
+                foundation: FoundationKind::SmallLot,
+                position: position(1, 1),
+            })
+            .expect("foundation is affordable and fits");
+        let CommandOutcome::SolutionBuilt { id: solution, .. } = outcome else {
+            panic!("building a foundation returns its solution id");
+        };
+
+        for _ in 0..4 {
+            let outcome = simulation
+                .apply(GameCommand::InstallService {
+                    solution,
+                    kind: ServiceKind::ApplicationServer,
+                })
+                .expect("small lot has an available floor");
+            let CommandOutcome::ServiceInstalled { id, .. } = outcome else {
+                panic!("installing a service returns its id");
+            };
+            assert_eq!(
+                simulation
+                    .service(id)
+                    .and_then(|service| service.solution()),
+                Some(solution)
+            );
+        }
+
+        let building = simulation.solution(solution).expect("solution exists");
+        assert_eq!(building.floor_count(), 4);
+        assert_eq!(building.services().len(), 4);
+        assert_eq!(simulation.map().solution_at(position(1, 1)), Some(solution));
+        assert_eq!(simulation.map().solution_at(position(2, 2)), Some(solution));
+        assert_eq!(simulation.map().service_at(position(1, 1)), None);
+
+        let credits = simulation.budget().credits();
+        let service_count = simulation.services().len();
+        assert_eq!(
+            simulation.apply(GameCommand::InstallService {
+                solution,
+                kind: ServiceKind::Cache,
+            }),
+            Err(CommandError::InvalidSolution(SolutionError::BuildingFull {
+                solution,
+                maximum_floors: 4,
+            }))
+        );
+        assert_eq!(simulation.budget().credits(), credits);
+        assert_eq!(simulation.services().len(), service_count);
+    }
+
+    #[test]
+    fn solution_and_legacy_service_placements_cannot_overlap() {
+        let mut simulation = Simulation::new(500, 0, map_size());
+        let outcome = simulation
+            .apply(GameCommand::BuildSolution {
+                foundation: FoundationKind::SmallLot,
+                position: position(0, 0),
+            })
+            .expect("foundation fits");
+        let CommandOutcome::SolutionBuilt { id, .. } = outcome else {
+            panic!("solution is built");
+        };
+
+        assert_eq!(
+            simulation.apply(GameCommand::BuildService {
+                kind: ServiceKind::Cache,
+                position: position(1, 1),
+            }),
+            Err(CommandError::InvalidPlacement(
+                PlacementError::SolutionOccupied {
+                    position: position(1, 1),
+                    solution_id: id,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn services_installed_in_one_building_keep_deterministic_routing_behavior() {
+        let mut simulation = Simulation::new(1_000, 100, map_size());
+        let outcome = simulation
+            .apply(GameCommand::BuildSolution {
+                foundation: FoundationKind::SmallLot,
+                position: position(1, 1),
+            })
+            .expect("foundation fits");
+        let CommandOutcome::SolutionBuilt { id: solution, .. } = outcome else {
+            panic!("solution is built");
+        };
+        let install = |simulation: &mut Simulation, kind| {
+            let outcome = simulation
+                .apply(GameCommand::InstallService { solution, kind })
+                .expect("floor is available");
+            let CommandOutcome::ServiceInstalled { id, .. } = outcome else {
+                panic!("service is installed");
+            };
+            id
+        };
+        let gateway = install(&mut simulation, ServiceKind::InternetGateway);
+        let app = install(&mut simulation, ServiceKind::ApplicationServer);
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: app,
+            })
+            .expect("installed services can be connected");
+
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
+        assert_eq!(simulation.advance().served, 100);
     }
 
     #[test]

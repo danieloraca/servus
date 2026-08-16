@@ -2,6 +2,14 @@
 
 Servus is an infrastructure strategy game in its earliest prototype stage.
 
+The city model is moving from one service per map tile to one solution building per lot. A
+foundation reserves city land and sets a maximum height; installing infrastructure adds floors to
+that building. Small lots support 4 floors, tower lots 10, and megatower lots 24. This creates the
+intended progression from small, inexpensive workloads to dense skyscrapers with more capacity,
+cost, complexity, and failure exposure. The deterministic simulation already supports solution
+lots and service installation; the graphical client is being migrated incrementally and still uses
+the original service placement controls during this transition.
+
 The repository is a Cargo workspace split into:
 
 - `servus-sim`: deterministic, engine-independent simulation;
