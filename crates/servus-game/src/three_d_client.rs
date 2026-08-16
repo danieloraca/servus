@@ -54,6 +54,9 @@ struct PrototypeBuildButton(PrototypeBuildAction);
 struct PrototypeFeedback;
 
 #[derive(Component)]
+struct FoundationPreview3d;
+
+#[derive(Component)]
 struct PrototypeStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +91,7 @@ pub fn run_3d_client() {
             Update,
             (
                 handle_build_palette,
+                update_foundation_preview,
                 place_from_build_tool,
                 sync_3d_scene,
                 select_floor,
@@ -142,6 +146,18 @@ fn setup_3d(
         })),
     ));
     spawn_grid(&mut commands, &mut meshes, &mut materials);
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgba(0.18, 0.8, 0.95, 0.38),
+            emissive: LinearRgba::rgb(0.02, 0.2, 0.28),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::default(),
+        Visibility::Hidden,
+        FoundationPreview3d,
+    ));
 
     commands.spawn((
         Text::new("SERVUS 3D\n\nLeft-click  Build\nRight-click floor  Inspect\nU  Upgrade inspected floor\nDrag  Orbit camera\nMouse wheel  Zoom"),
@@ -190,41 +206,43 @@ fn setup_3d(
 }
 
 fn spawn_build_palette(commands: &mut Commands) {
-    let actions = [
+    let lots = [
         (
-            "SMALL LOT\n100c",
+            "SMALL  2×2\n4 floors · 100c",
             PrototypeBuildAction::Foundation(FoundationKind::SmallLot),
         ),
         (
-            "TOWER LOT\n250c",
+            "TOWER  3×3\n10 floors · 350c",
             PrototypeBuildAction::Foundation(FoundationKind::TowerLot),
         ),
         (
-            "MEGATOWER\n500c",
+            "MEGA  4×4\n24 floors · 900c",
             PrototypeBuildAction::Foundation(FoundationKind::MegatowerLot),
         ),
+    ];
+    let services = [
         (
-            "GW\n50c",
+            "GW  50c",
             PrototypeBuildAction::Service(ServiceKind::InternetGateway),
         ),
         (
-            "FW\n125c",
+            "FW  125c",
             PrototypeBuildAction::Service(ServiceKind::Firewall),
         ),
         (
-            "LB\n75c",
+            "LB  75c",
             PrototypeBuildAction::Service(ServiceKind::LoadBalancer),
         ),
         (
-            "APP\n100c",
+            "APP  100c",
             PrototypeBuildAction::Service(ServiceKind::ApplicationServer),
         ),
         (
-            "QUEUE\n90c",
+            "QUEUE  90c",
             PrototypeBuildAction::Service(ServiceKind::MessageQueue),
         ),
         (
-            "SQL\n180c",
+            "SQL  180c",
             PrototypeBuildAction::Service(ServiceKind::RelationalDatabase),
         ),
     ];
@@ -236,32 +254,73 @@ fn spawn_build_palette(commands: &mut Commands) {
                 right: Val::Px(315.0),
                 bottom: Val::Px(20.0),
                 padding: UiRect::all(Val::Px(10.0)),
-                column_gap: Val::Px(6.0),
                 row_gap: Val::Px(6.0),
-                flex_direction: FlexDirection::Row,
-                flex_wrap: FlexWrap::Wrap,
+                flex_direction: FlexDirection::Column,
                 ..default()
             },
             BackgroundColor(Color::srgba(0.035, 0.065, 0.1, 0.96)),
             ZIndex(20),
         ))
-        .with_children(|row| {
-            for (label, action) in actions {
-                row.spawn((
-                    Button,
-                    Node {
-                        padding: UiRect::axes(Val::Px(8.0), Val::Px(7.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.08, 0.16, 0.24)),
-                    PrototypeBuildButton(action),
-                ))
-                .with_child((
-                    Text::new(label),
-                    TextFont::from_font_size(11.0),
-                    TextColor(Color::WHITE),
-                ));
-            }
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("LOTS — choose footprint and maximum height"),
+                TextFont::from_font_size(12.0),
+                TextColor(Color::srgb(0.7, 0.82, 0.92)),
+            ));
+            panel
+                .spawn(Node {
+                    column_gap: Val::Px(7.0),
+                    flex_direction: FlexDirection::Row,
+                    ..default()
+                })
+                .with_children(|row| {
+                    for (label, action) in lots {
+                        row.spawn((
+                            Button,
+                            Node {
+                                padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.08, 0.16, 0.24)),
+                            PrototypeBuildButton(action),
+                        ))
+                        .with_child((
+                            Text::new(label),
+                            TextFont::from_font_size(11.0),
+                            TextColor(Color::WHITE),
+                        ));
+                    }
+                });
+            panel.spawn((
+                Text::new("SERVICES — select, then click a building"),
+                TextFont::from_font_size(12.0),
+                TextColor(Color::srgb(0.7, 0.82, 0.92)),
+            ));
+            panel
+                .spawn(Node {
+                    column_gap: Val::Px(6.0),
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    ..default()
+                })
+                .with_children(|row| {
+                    for (label, action) in services {
+                        row.spawn((
+                            Button,
+                            Node {
+                                padding: UiRect::axes(Val::Px(9.0), Val::Px(6.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.08, 0.16, 0.24)),
+                            PrototypeBuildButton(action),
+                        ))
+                        .with_child((
+                            Text::new(label),
+                            TextFont::from_font_size(11.0),
+                            TextColor(Color::WHITE),
+                        ));
+                    }
+                });
         });
 }
 
@@ -302,16 +361,7 @@ fn handle_build_palette(
 ) {
     for (interaction, button, mut background) in &mut buttons {
         if *interaction == Interaction::Pressed {
-            tool.action = button.0;
-            tool.feedback = match button.0 {
-                PrototypeBuildAction::Foundation(foundation) => format!(
-                    "{} selected — click an empty grid area",
-                    foundation_name(foundation)
-                ),
-                PrototypeBuildAction::Service(kind) => {
-                    format!("{} selected — click a building", kind_name(kind))
-                }
-            };
+            select_build_action(&mut tool, button.0);
         }
         background.0 = if tool.action == button.0 {
             Color::srgb(0.08, 0.48, 0.72)
@@ -319,6 +369,93 @@ fn handle_build_palette(
             Color::srgb(0.15, 0.38, 0.55)
         } else {
             Color::srgb(0.08, 0.16, 0.24)
+        };
+    }
+}
+
+fn select_build_action(tool: &mut PrototypeBuildTool, action: PrototypeBuildAction) {
+    tool.action = action;
+    tool.feedback = match action {
+        PrototypeBuildAction::Foundation(foundation) => format!(
+            "{} selected — click an empty grid area",
+            foundation_name(foundation)
+        ),
+        PrototypeBuildAction::Service(kind) => {
+            format!("{} selected — click a building", kind_name(kind))
+        }
+    };
+}
+
+fn update_foundation_preview(
+    window: Single<&Window, With<PrimaryWindow>>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera3d>>,
+    prototype: Res<PrototypeSimulation>,
+    tool: Res<PrototypeBuildTool>,
+    buttons: Query<&Interaction, With<PrototypeBuildButton>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut preview: Single<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &MeshMaterial3d<StandardMaterial>,
+        ),
+        With<FoundationPreview3d>,
+    >,
+) {
+    let PrototypeBuildAction::Foundation(foundation) = tool.action else {
+        *preview.1 = Visibility::Hidden;
+        return;
+    };
+    if buttons
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
+        *preview.1 = Visibility::Hidden;
+        return;
+    }
+    let Some(cursor) = window.cursor_position() else {
+        *preview.1 = Visibility::Hidden;
+        return;
+    };
+    let (camera, camera_transform) = *camera;
+    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor) else {
+        *preview.1 = Visibility::Hidden;
+        return;
+    };
+    let Some(world) = ray_ground_intersection(ray.origin, *ray.direction) else {
+        *preview.1 = Visibility::Hidden;
+        return;
+    };
+    let map_size = prototype.simulation.map().size();
+    let Some(position) = world_to_city_grid(map_size, world) else {
+        *preview.1 = Visibility::Hidden;
+        return;
+    };
+    let footprint = foundation.footprint();
+    let width = f32::from(footprint.width()) * CITY_TILE - 0.18;
+    let depth = f32::from(footprint.height()) * CITY_TILE - 0.18;
+    let center = solution_world_center(map_size, position, foundation);
+    preview.0.translation = center + Vec3::Y * 0.06;
+    preview.0.scale = Vec3::new(width, 0.1, depth);
+    *preview.1 = Visibility::Visible;
+
+    let mut test = prototype.simulation.clone();
+    let valid = test
+        .apply(GameCommand::BuildSolution {
+            foundation,
+            position,
+        })
+        .is_ok();
+    if let Some(mut material) = materials.get_mut(&preview.2.0) {
+        material.base_color = if valid {
+            Color::srgba(0.12, 0.82, 0.95, 0.4)
+        } else {
+            Color::srgba(0.95, 0.12, 0.1, 0.45)
+        };
+        material.emissive = if valid {
+            LinearRgba::rgb(0.02, 0.22, 0.3)
+        } else {
+            LinearRgba::rgb(0.35, 0.01, 0.01)
         };
     }
 }
@@ -535,7 +672,7 @@ fn update_floor_appearance(
         };
         let base = kind_color(service.kind());
         material.base_color = match service.state() {
-            ServiceState::UnderConstruction { .. } => base.mix(&Color::BLACK, 0.58),
+            ServiceState::UnderConstruction { .. } => base.mix(&Color::srgb(1.0, 0.58, 0.08), 0.32),
             ServiceState::Disrupted { .. } => Color::srgb(0.85, 0.05, 0.05),
             ServiceState::Upgrading { .. } => {
                 let pulse = 0.55 + time.elapsed_secs().sin().abs() * 0.45;
@@ -545,6 +682,8 @@ fn update_floor_appearance(
         };
         material.emissive = if selected.0 == Some(service.id()) {
             LinearRgba::rgb(0.12, 0.5, 0.72)
+        } else if matches!(service.state(), ServiceState::UnderConstruction { .. }) {
+            LinearRgba::rgb(0.3, 0.11, 0.01)
         } else if matches!(service.state(), ServiceState::Upgrading { .. }) {
             LinearRgba::rgb(0.02, 0.18, 0.55)
         } else {
@@ -823,6 +962,31 @@ mod tests {
         assert_eq!(
             ray_ground_intersection(Vec3::new(1.0, 5.0, 2.0), -Vec3::Y),
             Some(Vec3::new(1.0, 0.0, 2.0))
+        );
+    }
+
+    #[test]
+    fn every_lot_choice_changes_the_active_3d_build_action() {
+        let mut tool = PrototypeBuildTool {
+            action: PrototypeBuildAction::Foundation(FoundationKind::SmallLot),
+            feedback: String::new(),
+        };
+        for foundation in [
+            FoundationKind::SmallLot,
+            FoundationKind::TowerLot,
+            FoundationKind::MegatowerLot,
+        ] {
+            select_build_action(&mut tool, PrototypeBuildAction::Foundation(foundation));
+            assert_eq!(tool.action, PrototypeBuildAction::Foundation(foundation));
+            assert!(tool.feedback.contains(foundation_name(foundation)));
+        }
+        assert!(
+            FoundationKind::SmallLot.footprint().width()
+                < FoundationKind::TowerLot.footprint().width()
+        );
+        assert!(
+            FoundationKind::TowerLot.footprint().width()
+                < FoundationKind::MegatowerLot.footprint().width()
         );
     }
 }
