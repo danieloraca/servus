@@ -101,6 +101,21 @@ struct NotificationText;
 #[derive(Component)]
 struct EconomicsText;
 
+#[derive(Component)]
+struct InspectionText;
+
+#[derive(Component)]
+struct BuildMenuButton;
+
+#[derive(Component)]
+struct BuildCategoryButton(InfrastructureCategory);
+
+#[derive(Component)]
+struct BuildServiceButton(ServiceKind);
+
+#[derive(Component)]
+struct BuildFoundationButton;
+
 #[derive(Resource)]
 struct BuildTool {
     selected: ServiceKind,
@@ -225,17 +240,17 @@ pub fn run_bevy_client() {
             operating_profit: 0,
         })
         .insert_resource(BuildTool {
-            selected: ServiceKind::ApplicationServer,
+            selected: ServiceKind::InternetGateway,
             hovered: None,
             network_mode: None,
             connection_from: None,
             inspected: None,
             inspected_solution: None,
             hovered_service: None,
-            foundation_mode: false,
+            foundation_mode: true,
             foundation: FoundationKind::SmallLot,
-            category: InfrastructureCategory::Compute,
-            feedback: "Press B for a foundation; Tab changes the service category".to_owned(),
+            category: InfrastructureCategory::Network,
+            feedback: "Step 1: click an empty area to place a Small Lot".to_owned(),
         })
         .insert_resource(AudioSettings::default())
         .insert_resource(SoundQueue::default())
@@ -258,6 +273,8 @@ pub fn run_bevy_client() {
                 toggle_pause,
                 cycle_service_category,
                 select_building,
+                handle_build_menu_interactions,
+                update_build_menu_styles,
                 toggle_foundation_mode,
                 toggle_network_mode,
                 update_audio_controls,
@@ -268,6 +285,7 @@ pub fn run_bevy_client() {
                 update_service_visuals,
                 update_metrics,
                 update_economics,
+                update_inspection,
                 update_notification,
             )
                 .chain(),
@@ -321,14 +339,14 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
 
     commands.spawn((
         Text::new("Loading controls…"),
-        TextFont::from_font_size(12.0),
+        TextFont::from_font_size(14.0),
         TextColor(Color::srgb(0.84, 0.9, 0.96)),
         Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(22.0),
-            top: Val::Px(22.0),
-            padding: UiRect::all(Val::Px(10.0)),
-            width: Val::Px(330.0),
+            left: Val::Px(18.0),
+            top: Val::Px(18.0),
+            padding: UiRect::all(Val::Px(16.0)),
+            width: Val::Px(310.0),
             ..default()
         },
         BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.94)),
@@ -336,13 +354,15 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD move   B foundation   Tab category   1–9 floor   C/X links   U upgrade"),
-        TextFont::from_font_size(16.0),
-        TextColor(Color::srgb(0.58, 0.68, 0.78)),
+        Text::new(
+            "WASD  Pan     Wheel  Zoom     Right-click  Inspect     Space  Pause     R  Restart",
+        ),
+        TextFont::from_font_size(14.0),
+        TextColor(Color::srgb(0.68, 0.76, 0.84)),
         Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(360.0),
-            bottom: Val::Px(24.0),
+            left: Val::Px(350.0),
+            bottom: Val::Px(18.0),
             ..default()
         },
     ));
@@ -368,8 +388,8 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
         TextColor(Color::srgb(0.82, 0.91, 0.8)),
         Node {
             position_type: PositionType::Absolute,
-            right: Val::Px(22.0),
-            top: Val::Px(72.0),
+            right: Val::Px(18.0),
+            top: Val::Px(18.0),
             padding: UiRect::all(Val::Px(14.0)),
             width: Val::Px(245.0),
             ..default()
@@ -377,6 +397,124 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
         BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.94)),
         EconomicsText,
     ));
+
+    commands.spawn((
+        Text::new("Nothing selected"),
+        TextFont::from_font_size(14.0),
+        TextColor(Color::srgb(0.82, 0.88, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(18.0),
+            bottom: Val::Px(58.0),
+            padding: UiRect::all(Val::Px(14.0)),
+            width: Val::Px(280.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.94)),
+        InspectionText,
+    ));
+
+    spawn_build_menu(&mut commands);
+}
+
+fn spawn_build_menu(commands: &mut Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(350.0),
+                right: Val::Px(310.0),
+                bottom: Val::Px(52.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.96)),
+            ZIndex(20),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("BUILD MENU"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb(0.82, 0.9, 0.98)),
+            ));
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    for category in InfrastructureCategory::ALL
+                        .into_iter()
+                        .filter(|category| service_in_category(*category, 0).is_some())
+                    {
+                        row.spawn((
+                            Button,
+                            Node {
+                                padding: UiRect::axes(Val::Px(9.0), Val::Px(5.0)),
+                                ..default()
+                            },
+                            BackgroundColor(menu_button_color(false, Interaction::None)),
+                            BuildMenuButton,
+                            BuildCategoryButton(category),
+                        ))
+                        .with_child((
+                            Text::new(category.label()),
+                            TextFont::from_font_size(12.0),
+                            TextColor(Color::WHITE),
+                        ));
+                    }
+                });
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(7.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Button,
+                        Node {
+                            padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                            ..default()
+                        },
+                        BackgroundColor(menu_button_color(false, Interaction::None)),
+                        BuildMenuButton,
+                        BuildFoundationButton,
+                    ))
+                    .with_child((
+                        Text::new("LOT\nFoundation"),
+                        TextFont::from_font_size(12.0),
+                        TextColor(Color::WHITE),
+                    ));
+                    for kind in ServiceKind::ALL {
+                        let style = visual_style(kind);
+                        row.spawn((
+                            Button,
+                            Node {
+                                display: Display::None,
+                                padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                                ..default()
+                            },
+                            BackgroundColor(menu_button_color(false, Interaction::None)),
+                            BuildMenuButton,
+                            BuildServiceButton(kind),
+                        ))
+                        .with_child((
+                            Text::new(format!(
+                                "{}  {}c\n{}",
+                                style.abbreviation,
+                                kind.build_cost(),
+                                service_kind_name(kind)
+                            )),
+                            TextFont::from_font_size(12.0),
+                            TextColor(Color::WHITE),
+                        ));
+                    }
+                });
+        });
 }
 
 fn spawn_service_visual(commands: &mut Commands, map_size: MapSize, service: Service) {
@@ -575,13 +713,107 @@ fn cycle_service_category(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<Buil
     if !keys.just_pressed(KeyCode::Tab) {
         return;
     }
-    tool.category = next_populated_category(tool.category);
-    tool.selected = service_in_category(tool.category, 0)
-        .expect("populated categories always have a first service");
+    let category = next_populated_category(tool.category);
+    select_category(&mut tool, category);
+}
+
+fn select_category(tool: &mut BuildTool, category: InfrastructureCategory) {
+    tool.category = category;
+    tool.selected = service_in_category(category, 0)
+        .expect("selectable categories always have a first service");
     tool.foundation_mode = false;
     tool.network_mode = None;
     tool.connection_from = None;
     tool.feedback = format!("{} catalog", tool.category.label());
+}
+
+fn handle_build_menu_interactions(
+    mut tool: ResMut<BuildTool>,
+    category_buttons: Query<(&Interaction, &BuildCategoryButton), Changed<Interaction>>,
+    service_buttons: Query<(&Interaction, &BuildServiceButton), Changed<Interaction>>,
+    foundation_button: Query<&Interaction, (Changed<Interaction>, With<BuildFoundationButton>)>,
+) {
+    for (interaction, button) in &category_buttons {
+        if *interaction == Interaction::Pressed {
+            select_category(&mut tool, button.0);
+        }
+    }
+    for (interaction, button) in &service_buttons {
+        if *interaction == Interaction::Pressed {
+            tool.selected = button.0;
+            tool.category = button.0.category();
+            tool.foundation_mode = false;
+            tool.network_mode = None;
+            tool.connection_from = None;
+            tool.feedback = selection_feedback(button.0);
+        }
+    }
+    for interaction in &foundation_button {
+        if *interaction == Interaction::Pressed {
+            tool.foundation_mode = true;
+            tool.network_mode = None;
+            tool.connection_from = None;
+            tool.feedback = format!(
+                "Foundation: {} — {} floors, {} credits",
+                foundation_name(tool.foundation),
+                tool.foundation.maximum_floors(),
+                tool.foundation.build_cost()
+            );
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_build_menu_styles(
+    tool: Res<BuildTool>,
+    mut category_buttons: Query<
+        (&Interaction, &BuildCategoryButton, &mut BackgroundColor),
+        Without<BuildServiceButton>,
+    >,
+    mut service_buttons: Query<
+        (
+            &Interaction,
+            &BuildServiceButton,
+            &mut BackgroundColor,
+            &mut Node,
+        ),
+        Without<BuildCategoryButton>,
+    >,
+    mut foundation_button: Single<
+        (&Interaction, &mut BackgroundColor),
+        (
+            With<BuildFoundationButton>,
+            Without<BuildCategoryButton>,
+            Without<BuildServiceButton>,
+        ),
+    >,
+) {
+    for (interaction, button, mut background) in &mut category_buttons {
+        background.0 = menu_button_color(tool.category == button.0, *interaction);
+    }
+    for (interaction, button, mut background, mut node) in &mut service_buttons {
+        node.display = if button.0.category() == tool.category {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        background.0 = menu_button_color(
+            !tool.foundation_mode && tool.selected == button.0,
+            *interaction,
+        );
+    }
+    let (interaction, background) = &mut *foundation_button;
+    background.0 = menu_button_color(tool.foundation_mode, **interaction);
+}
+
+fn menu_button_color(active: bool, interaction: Interaction) -> Color {
+    if active {
+        Color::srgb(0.12, 0.52, 0.76)
+    } else if interaction == Interaction::Hovered {
+        Color::srgb(0.16, 0.28, 0.4)
+    } else {
+        Color::srgb(0.08, 0.14, 0.22)
+    }
 }
 
 fn service_in_category(category: InfrastructureCategory, slot: usize) -> Option<ServiceKind> {
@@ -812,8 +1044,15 @@ fn handle_map_click(
     mut tool: ResMut<BuildTool>,
     mut sounds: ResMut<SoundQueue>,
     solution_visuals: Query<(Entity, &SolutionVisual)>,
+    build_menu_buttons: Query<&Interaction, With<BuildMenuButton>>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if build_menu_buttons
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
         return;
     }
     let Some(position) = tool.hovered else {
@@ -882,8 +1121,11 @@ fn handle_map_click(
                 );
                 tool.inspected_solution = Some(solution.id());
                 tool.inspected = None;
+                tool.foundation_mode = false;
+                tool.category = InfrastructureCategory::Network;
+                tool.selected = ServiceKind::InternetGateway;
                 tool.feedback = format!(
-                    "Built {} #{}; select a service and click the building",
+                    "Step 2: {} #{} is ready — click it to install the Internet Gateway",
                     foundation_name(solution.foundation()),
                     solution.id().value()
                 );
@@ -898,6 +1140,12 @@ fn handle_map_click(
     }
 
     if let Some(solution_id) = client.simulation.map().solution_at(position) {
+        let selected = tool.selected;
+        let first_of_kind = !client
+            .simulation
+            .services()
+            .iter()
+            .any(|service| service.kind() == selected);
         match install_service(&mut client.simulation, solution_id, tool.selected) {
             Ok(service) => {
                 client.capital_invested = client
@@ -922,12 +1170,31 @@ fn handle_map_click(
                 );
                 tool.inspected_solution = Some(solution_id);
                 tool.inspected = None;
-                tool.feedback = format!(
+                let installed = format!(
                     "Installed {} on floor {} of solution #{}",
                     service_kind_name(service.kind()),
                     solution.floor_count(),
                     solution_id.value()
                 );
+                tool.feedback = if first_of_kind {
+                    guided_successor(service.kind()).map_or_else(
+                        || {
+                            if service.kind() == ServiceKind::ApplicationServer {
+                                "Core stack ready — press C and connect GW → FW → LB → APP"
+                                    .to_owned()
+                            } else {
+                                installed.clone()
+                            }
+                        },
+                        |next| {
+                            tool.selected = next;
+                            tool.category = next.category();
+                            format!("{installed}. Next: install {}", service_kind_name(next))
+                        },
+                    )
+                } else {
+                    installed
+                };
                 sounds.push(SoundEffect::BuildPlaced);
             }
             Err(error) => {
@@ -1046,6 +1313,14 @@ fn update_economics(
     mut text: Single<&mut Text, With<EconomicsText>>,
 ) {
     **text = Text::new(economics_text(&client));
+}
+
+fn update_inspection(
+    client: Res<ClientSimulation>,
+    tool: Res<BuildTool>,
+    mut text: Single<&mut Text, With<InspectionText>>,
+) {
+    **text = Text::new(inspection_panel_text(&client, &tool));
 }
 
 fn draw_map(
@@ -1990,17 +2265,17 @@ fn reset_scenario(
     client.operating_cost_shortfall = 0;
     client.operating_profit = 0;
 
-    tool.selected = ServiceKind::ApplicationServer;
+    tool.selected = ServiceKind::InternetGateway;
     tool.hovered = None;
     tool.network_mode = None;
     tool.connection_from = None;
     tool.inspected = None;
     tool.inspected_solution = None;
     tool.hovered_service = None;
-    tool.foundation_mode = false;
+    tool.foundation_mode = true;
     tool.foundation = FoundationKind::SmallLot;
-    tool.category = InfrastructureCategory::Compute;
-    tool.feedback = "Scenario restarted; press B to place a foundation".to_owned();
+    tool.category = InfrastructureCategory::Network;
+    tool.feedback = "Step 1: click an empty area to place a Small Lot".to_owned();
 
     *progress = GameProgress::new();
     progress.notification = Some("Scenario restarted".to_owned());
@@ -2098,6 +2373,15 @@ fn selection_feedback(kind: ServiceKind) -> String {
     format!("Selected {} — {hint}", service_kind_name(kind))
 }
 
+const fn guided_successor(kind: ServiceKind) -> Option<ServiceKind> {
+    match kind {
+        ServiceKind::InternetGateway => Some(ServiceKind::Firewall),
+        ServiceKind::Firewall => Some(ServiceKind::LoadBalancer),
+        ServiceKind::LoadBalancer => Some(ServiceKind::ApplicationServer),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 fn build_preview_color(style: VisualStyle, valid: bool) -> Color {
     if valid {
@@ -2154,15 +2438,23 @@ fn roi_percent(operating_profit: i128, capital_invested: u64) -> Option<f64> {
 fn economics_text(client: &ClientSimulation) -> String {
     let roi = roi_percent(client.operating_profit, client.capital_invested)
         .map_or_else(|| "n/a".to_owned(), |roi| format!("{roi:.1}%"));
+    let report = client.last_report.as_ref();
+    let served = report.map_or(0, |report| report.served);
+    let demand = client.simulation.traffic().requests_per_tick();
+    let processed = report.map_or(0, |report| report.messages_processed);
+    let queued = report.map_or(0, |report| report.messages_queued);
     format!(
-        "ECONOMICS\n\nRevenue         {:>8}\nOperating costs {:>8}\nOutage losses   {:>8}\nOp. profit      {:>8}\nCapital invested{:>8}\nUnpaid costs    {:>8}\nROI             {:>8}",
+        "BUSINESS\n\nCredits       {:>8}\nProfit        {:>8}\nRevenue       {:>8}\nRunning costs {:>8}\nOutage losses {:>8}\nROI           {:>8}\n\nTHIS TICK\nWeb requests  {:>4} / {:<4}\nAsync work   {:>5}\nWaiting      {:>5}",
+        client.simulation.budget().credits(),
+        client.operating_profit,
         client.total_revenue,
         client.operating_costs,
         client.outage_losses,
-        client.operating_profit,
-        client.capital_invested,
-        client.operating_cost_shortfall,
         roi,
+        served,
+        demand,
+        processed,
+        queued,
     )
 }
 
@@ -2172,12 +2464,8 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let demand = simulation.traffic().requests_per_tick();
     let served = report.map_or(0, |report| report.served);
     let dropped = report.map_or(0, |report| report.dropped);
-    let database_requests = report.map_or(0, |report| report.database_requests);
-    let cache_hits = report.map_or(0, |report| report.cache_hits);
-    let messages_published = report.map_or(0, |report| report.messages_published);
     let messages_processed = report.map_or(0, |report| report.messages_processed);
     let messages_queued = report.map_or(0, |report| report.messages_queued);
-    let messages_dropped = report.map_or(0, |report| report.messages_dropped);
     let mode = if tool.foundation_mode {
         format!(
             "Mode: Build {} ({}c / {} floors)",
@@ -2206,50 +2494,23 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
             tool.selected.build_cost()
         )
     };
-    let inspection = tool
-        .inspected_solution
-        .and_then(|id| solution_inspection_text(client, id))
-        .or_else(|| tool.inspected.and_then(|id| inspection_text(client, id)))
-        .unwrap_or_else(|| "INSPECT\nRight-click a service or building".to_owned());
     let objectives = objectives_text(client);
-    let build_menu = build_menu_text(tool.category);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nDB requests  {:>6}\nCache hits   {:>6}\nMsg published{:>6}\nMsg processed{:>6}\nMsg queued   {:>6}\nMsg dropped  {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nCATALOG: {}\n{build_menu}Tab  Next category\nB  Foundation / cycle size\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  •  {status}\nTick {}   Credits {}   Threat in {}\nWeb {served}/{demand}   Dropped {dropped}\nAsync {messages_processed}   Waiting {messages_queued}\n\nACTIVE TOOL\n{mode}\n{}\n\n{objectives}\n\nSHORTCUTS\nTab  Next category\nB  Cycle foundation size\nC / X  Connect / remove\nU  Upgrade inspected",
         simulation.tick().number(),
         simulation.budget().credits(),
-        demand,
-        served,
-        dropped,
-        database_requests,
-        cache_hits,
-        messages_published,
-        messages_processed,
-        messages_queued,
-        messages_dropped,
-        client.total_served,
-        client.blocked_attacks,
-        client.successful_failovers,
-        client.outage_losses,
         ticks_until_attack(simulation.tick().number()),
-        tool.category.label(),
         tool.feedback,
     )
 }
 
-fn build_menu_text(category: InfrastructureCategory) -> String {
-    ServiceKind::ALL
-        .into_iter()
-        .filter(|kind| kind.category() == category)
-        .enumerate()
-        .map(|(slot, kind)| {
-            format!(
-                "{}  {:<20} {:>3}\n",
-                slot + 1,
-                service_kind_name(kind),
-                kind.build_cost()
-            )
+fn inspection_panel_text(client: &ClientSimulation, tool: &BuildTool) -> String {
+    tool.inspected_solution
+        .and_then(|id| solution_inspection_text(client, id))
+        .or_else(|| tool.inspected.and_then(|id| inspection_text(client, id)))
+        .unwrap_or_else(|| {
+            "INSPECT\n\nRight-click a building or floor\nto see capacity, cost, links,\nand live traffic.".to_owned()
         })
-        .collect()
 }
 
 #[cfg(test)]
@@ -2601,6 +2862,57 @@ mod tests {
         assert!(selection_feedback(ServiceKind::MessageQueue).contains("waits safely"));
         assert!(selection_feedback(ServiceKind::PubSubTopic).contains("every worker"));
         assert!(selection_feedback(ServiceKind::EventBus).contains("routes once"));
+    }
+
+    #[test]
+    fn guided_core_stack_starts_at_ingress_and_moves_toward_compute() {
+        assert_eq!(
+            guided_successor(ServiceKind::InternetGateway),
+            Some(ServiceKind::Firewall)
+        );
+        assert_eq!(
+            guided_successor(ServiceKind::Firewall),
+            Some(ServiceKind::LoadBalancer)
+        );
+        assert_eq!(
+            guided_successor(ServiceKind::LoadBalancer),
+            Some(ServiceKind::ApplicationServer)
+        );
+        assert_eq!(guided_successor(ServiceKind::ApplicationServer), None);
+    }
+
+    #[test]
+    fn clicking_a_build_menu_category_selects_its_first_service() {
+        let mut app = App::new();
+        app.insert_resource(BuildTool {
+            selected: ServiceKind::InternetGateway,
+            hovered: None,
+            network_mode: Some(NetworkMode::Connect),
+            connection_from: None,
+            inspected: None,
+            inspected_solution: None,
+            hovered_service: None,
+            foundation_mode: true,
+            foundation: FoundationKind::SmallLot,
+            category: InfrastructureCategory::Network,
+            feedback: String::new(),
+        });
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            BuildCategoryButton(InfrastructureCategory::Messaging),
+        ));
+        app.world_mut()
+            .spawn((Interaction::None, BuildFoundationButton));
+        app.add_systems(Update, handle_build_menu_interactions);
+
+        app.update();
+
+        let tool = app.world().resource::<BuildTool>();
+        assert_eq!(tool.category, InfrastructureCategory::Messaging);
+        assert_eq!(tool.selected, ServiceKind::MessageQueue);
+        assert!(!tool.foundation_mode);
+        assert_eq!(tool.network_mode, None);
+        assert_eq!(tool.connection_from, None);
     }
 
     #[test]
@@ -3210,15 +3522,15 @@ mod tests {
         assert_eq!(client.operating_costs, 0);
         assert_eq!(client.operating_cost_shortfall, 0);
         assert_eq!(client.operating_profit, 0);
-        assert_eq!(tool.selected, ServiceKind::ApplicationServer);
+        assert_eq!(tool.selected, ServiceKind::InternetGateway);
         assert_eq!(tool.network_mode, None);
         assert_eq!(tool.connection_from, None);
         assert_eq!(tool.inspected, None);
         assert_eq!(tool.inspected_solution, None);
         assert_eq!(tool.hovered_service, None);
-        assert!(!tool.foundation_mode);
+        assert!(tool.foundation_mode);
         assert_eq!(tool.foundation, FoundationKind::SmallLot);
-        assert_eq!(tool.category, InfrastructureCategory::Compute);
+        assert_eq!(tool.category, InfrastructureCategory::Network);
         assert_eq!(progress.completed, [false; OBJECTIVE_COUNT]);
         assert!(!progress.won);
         assert_eq!(progress.notification.as_deref(), Some("Scenario restarted"));
@@ -3256,10 +3568,11 @@ mod tests {
             feedback: "Ready".to_owned(),
         };
         let text = metrics_text(&client, &tool, "RUNNING");
-        assert!(text.contains("Tick              0"));
-        assert!(text.contains("Credits          45"));
-        assert!(text.contains("Demand          200"));
-        assert!(text.contains("Total served      0"));
+        assert!(text.contains("SERVUS  •  RUNNING"));
+        assert!(text.contains("Tick 0   Credits 45"));
+        assert!(text.contains("Web 0/200"));
+        assert!(text.contains("ACTIVE TOOL"));
+        assert!(text.contains("SHORTCUTS"));
         assert!(text.contains("Mode: Build Application Server (100)"));
         assert!(text.contains("Ready"));
     }
@@ -3289,13 +3602,14 @@ mod tests {
         };
 
         let text = economics_text(&client);
-        assert!(text.contains("Revenue              250"));
-        assert!(text.contains("Operating costs       75"));
-        assert!(text.contains("Outage losses         25"));
-        assert!(text.contains("Op. profit           150"));
-        assert!(text.contains("Capital invested     100"));
-        assert!(text.contains("Unpaid costs           5"));
-        assert!(text.contains("ROI                50.0%"));
+        assert!(text.contains("BUSINESS"));
+        assert!(text.contains("Profit             150"));
+        assert!(text.contains("Revenue            250"));
+        assert!(text.contains("Running costs       75"));
+        assert!(text.contains("Outage losses"));
+        assert!(text.contains("25"));
+        assert!(text.contains("ROI              50.0%"));
+        assert!(text.contains("THIS TICK"));
     }
 
     #[test]
