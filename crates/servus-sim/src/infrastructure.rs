@@ -1,4 +1,5 @@
 use crate::{Footprint, GridPosition};
+use std::fmt;
 
 /// The stable identity of a constructed service.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -39,9 +40,36 @@ impl ServiceKind {
     }
 
     #[must_use]
+    pub const fn construction_ticks(self) -> u16 {
+        match self {
+            Self::ApplicationServer => 3,
+        }
+    }
+
+    #[must_use]
     pub const fn footprint(self) -> Footprint {
         match self {
             Self::ApplicationServer => Footprint::new(1, 1),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceState {
+    UnderConstruction { ticks_remaining: u16 },
+    Operational,
+}
+
+impl fmt::Display for ServiceState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnderConstruction { ticks_remaining } => {
+                write!(
+                    formatter,
+                    "under construction ({ticks_remaining} ticks remaining)"
+                )
+            }
+            Self::Operational => formatter.write_str("operational"),
         }
     }
 }
@@ -51,11 +79,25 @@ pub struct Service {
     id: ServiceId,
     kind: ServiceKind,
     position: GridPosition,
+    state: ServiceState,
 }
 
 impl Service {
     pub(crate) const fn new(id: ServiceId, kind: ServiceKind, position: GridPosition) -> Self {
-        Self { id, kind, position }
+        let construction_ticks = kind.construction_ticks();
+        let state = if construction_ticks == 0 {
+            ServiceState::Operational
+        } else {
+            ServiceState::UnderConstruction {
+                ticks_remaining: construction_ticks,
+            }
+        };
+        Self {
+            id,
+            kind,
+            position,
+            state,
+        }
     }
 
     #[must_use]
@@ -74,8 +116,32 @@ impl Service {
     }
 
     #[must_use]
+    pub const fn state(self) -> ServiceState {
+        self.state
+    }
+
+    #[must_use]
     pub const fn request_capacity(self) -> u64 {
-        self.kind.request_capacity()
+        match self.state {
+            ServiceState::UnderConstruction { .. } => 0,
+            ServiceState::Operational => self.kind.request_capacity(),
+        }
+    }
+
+    pub(crate) fn advance_construction(&mut self) -> bool {
+        match self.state {
+            ServiceState::UnderConstruction { ticks_remaining: 1 } => {
+                self.state = ServiceState::Operational;
+                true
+            }
+            ServiceState::UnderConstruction { ticks_remaining } => {
+                self.state = ServiceState::UnderConstruction {
+                    ticks_remaining: ticks_remaining - 1,
+                };
+                false
+            }
+            ServiceState::Operational => false,
+        }
     }
 }
 
@@ -88,6 +154,7 @@ mod tests {
         let kind = ServiceKind::ApplicationServer;
         assert_eq!(kind.build_cost(), 100);
         assert_eq!(kind.request_capacity(), 100);
+        assert_eq!(kind.construction_ticks(), 3);
     }
 
     #[test]
@@ -97,7 +164,11 @@ mod tests {
         assert_eq!(service.id().value(), 7);
         assert_eq!(service.kind(), ServiceKind::ApplicationServer);
         assert_eq!(service.position(), position);
-        assert_eq!(service.request_capacity(), 100);
+        assert_eq!(
+            service.state(),
+            ServiceState::UnderConstruction { ticks_remaining: 3 }
+        );
+        assert_eq!(service.request_capacity(), 0);
     }
 
     #[test]
@@ -109,5 +180,35 @@ mod tests {
     fn application_server_occupies_one_tile() {
         assert_eq!(ServiceKind::ApplicationServer.footprint().width(), 1);
         assert_eq!(ServiceKind::ApplicationServer.footprint().height(), 1);
+    }
+
+    #[test]
+    fn construction_progresses_until_the_service_becomes_operational() {
+        let mut service = Service::new(
+            ServiceId::new(7),
+            ServiceKind::ApplicationServer,
+            GridPosition::new(3, 4),
+        );
+
+        assert!(!service.advance_construction());
+        assert_eq!(
+            service.state(),
+            ServiceState::UnderConstruction { ticks_remaining: 2 }
+        );
+        assert!(!service.advance_construction());
+        assert_eq!(service.request_capacity(), 0);
+        assert!(service.advance_construction());
+        assert_eq!(service.state(), ServiceState::Operational);
+        assert_eq!(service.request_capacity(), 100);
+        assert!(!service.advance_construction());
+    }
+
+    #[test]
+    fn service_states_have_readable_names() {
+        assert_eq!(
+            ServiceState::UnderConstruction { ticks_remaining: 2 }.to_string(),
+            "under construction (2 ticks remaining)"
+        );
+        assert_eq!(ServiceState::Operational.to_string(), "operational");
     }
 }

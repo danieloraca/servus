@@ -58,6 +58,11 @@ impl Simulation {
         &self.services
     }
 
+    #[must_use]
+    pub fn service(&self, id: ServiceId) -> Option<&Service> {
+        self.services.iter().find(|service| service.id() == id)
+    }
+
     pub fn apply(&mut self, command: GameCommand) -> Result<CommandOutcome, CommandError> {
         match command {
             GameCommand::BuildService { kind, position } => {
@@ -82,6 +87,18 @@ impl Simulation {
     pub fn advance(&mut self) -> TickReport {
         self.tick.advance();
 
+        let completed_services = self
+            .services
+            .iter_mut()
+            .filter_map(|service| {
+                if service.advance_construction() {
+                    Some(service.id())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let received = self.traffic.requests_per_tick();
         let capacity = self.services.iter().fold(0_u64, |total, service| {
             total.saturating_add(service.request_capacity())
@@ -97,13 +114,14 @@ impl Simulation {
             served,
             dropped,
             revenue,
+            completed_services,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{BudgetError, GridPosition, PlacementError, ServiceKind};
+    use crate::{BudgetError, GridPosition, PlacementError, ServiceKind, ServiceState};
 
     use super::*;
 
@@ -116,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn building_a_service_spends_credits_and_adds_capacity() {
+    fn building_a_service_spends_credits_and_reserves_its_tile() {
         let mut simulation = Simulation::new(250, 0, map_size());
         let outcome = simulation.apply(GameCommand::BuildService {
             kind: ServiceKind::ApplicationServer,
@@ -132,6 +150,15 @@ mod tests {
         );
         assert_eq!(simulation.budget().credits(), 150);
         assert_eq!(simulation.services().len(), 1);
+        assert_eq!(
+            simulation.service(ServiceId::new(1)),
+            simulation.services().first()
+        );
+        assert_eq!(simulation.service(ServiceId::new(99)), None);
+        assert_eq!(
+            simulation.services()[0].state(),
+            ServiceState::UnderConstruction { ticks_remaining: 3 }
+        );
         assert_eq!(
             simulation.map().service_at(position(2, 3)),
             Some(ServiceId::new(1))
@@ -186,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tick_serves_requests_up_to_available_capacity() {
+    fn construction_must_complete_before_capacity_becomes_available() {
         let mut simulation = Simulation::new(100, 140, map_size());
         simulation
             .apply(GameCommand::BuildService {
@@ -194,12 +221,23 @@ mod tests {
                 position: position(0, 0),
             })
             .expect("the test has enough construction credits");
-        let report = simulation.advance();
-        assert_eq!(report.tick.number(), 1);
-        assert_eq!(report.received, 140);
-        assert_eq!(report.served, 100);
-        assert_eq!(report.dropped, 40);
-        assert_eq!(report.revenue, 100);
+        let first = simulation.advance();
+        assert_eq!(first.tick.number(), 1);
+        assert_eq!(first.served, 0);
+        assert_eq!(first.dropped, 140);
+        assert!(first.completed_services.is_empty());
+
+        let second = simulation.advance();
+        assert_eq!(second.served, 0);
+        assert!(second.completed_services.is_empty());
+
+        let third = simulation.advance();
+        assert_eq!(third.tick.number(), 3);
+        assert_eq!(third.received, 140);
+        assert_eq!(third.served, 100);
+        assert_eq!(third.dropped, 40);
+        assert_eq!(third.revenue, 100);
+        assert_eq!(third.completed_services, vec![ServiceId::new(1)]);
         assert_eq!(simulation.budget().credits(), 100);
     }
 
@@ -210,6 +248,7 @@ mod tests {
         assert_eq!(report.served, 0);
         assert_eq!(report.dropped, 30);
         assert_eq!(report.revenue, 0);
+        assert!(report.completed_services.is_empty());
     }
 
     #[test]
@@ -221,10 +260,14 @@ mod tests {
                 position: position(0, 0),
             })
             .expect("the test has enough construction credits");
-        assert_eq!(simulation.advance().received, 20);
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
         simulation.set_requests_per_tick(75);
         assert_eq!(simulation.traffic().requests_per_tick(), 75);
-        assert_eq!(simulation.advance().received, 75);
+        let report = simulation.advance();
+        assert_eq!(report.received, 75);
+        assert_eq!(report.served, 75);
     }
 
     #[test]

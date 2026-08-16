@@ -6,10 +6,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = run_demo()?;
 
     println!(
-        "Built {} at ({}, {}) | tick={} received={} served={} dropped={} credits={}",
+        "Built {} at ({}, {}) | state={} tick={} received={} served={} dropped={} credits={}",
         result.service_name,
         result.service_position.x,
         result.service_position.y,
+        result.service_state,
         result.report.tick.number(),
         result.report.received,
         result.report.served,

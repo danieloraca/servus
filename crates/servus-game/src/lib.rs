@@ -1,7 +1,7 @@
 use servus_content::ContentCatalog;
 use servus_sim::{
-    CommandError, GameCommand, GridPosition, MapSize, MapSizeError, ServiceKind, Simulation,
-    TickReport,
+    CommandError, CommandOutcome, GameCommand, GridPosition, MapSize, MapSizeError, ServiceKind,
+    ServiceState, Simulation, TickReport,
 };
 
 pub const STARTING_CREDITS: u64 = 250;
@@ -14,6 +14,7 @@ pub const DEMO_SERVER_POSITION: GridPosition = GridPosition::new(3, 4);
 pub struct DemoResult {
     pub service_name: String,
     pub service_position: GridPosition,
+    pub service_state: ServiceState,
     pub report: TickReport,
     pub remaining_credits: u64,
 }
@@ -53,17 +54,23 @@ pub fn run_demo() -> Result<DemoResult, DemoError> {
     let map_size =
         MapSize::new(DEMO_MAP_WIDTH, DEMO_MAP_HEIGHT).map_err(DemoError::InvalidMapSize)?;
     let mut simulation = Simulation::new(STARTING_CREDITS, STARTING_REQUESTS_PER_TICK, map_size);
-    simulation
+    let outcome = simulation
         .apply(GameCommand::BuildService {
             kind,
             position: DEMO_SERVER_POSITION,
         })
         .map_err(DemoError::Command)?;
+    let CommandOutcome::ServiceBuilt { id, .. } = outcome;
     let report = simulation.advance();
+    let service_state = simulation
+        .service(id)
+        .expect("a successful build command creates its service")
+        .state();
 
     Ok(DemoResult {
         service_name,
         service_position: DEMO_SERVER_POSITION,
+        service_state,
         report,
         remaining_credits: simulation.budget().credits(),
     })
@@ -80,11 +87,16 @@ mod tests {
         let result = run_demo().expect("the demo starts with enough construction credits");
         assert_eq!(result.service_name, "Application Server");
         assert_eq!(result.service_position, GridPosition::new(3, 4));
+        assert_eq!(
+            result.service_state,
+            ServiceState::UnderConstruction { ticks_remaining: 2 }
+        );
         assert_eq!(result.report.tick.number(), 1);
         assert_eq!(result.report.received, 140);
-        assert_eq!(result.report.served, 100);
-        assert_eq!(result.report.dropped, 40);
-        assert_eq!(result.remaining_credits, 250);
+        assert_eq!(result.report.served, 0);
+        assert_eq!(result.report.dropped, 140);
+        assert!(result.report.completed_services.is_empty());
+        assert_eq!(result.remaining_credits, 150);
     }
 
     #[test]

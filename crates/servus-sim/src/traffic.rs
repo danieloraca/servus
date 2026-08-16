@@ -1,4 +1,4 @@
-use crate::Tick;
+use crate::{ServiceId, Tick};
 
 /// Incoming demand for a solution during every simulation tick.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -23,13 +23,14 @@ impl Traffic {
 }
 
 /// The result of processing one simulation tick.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TickReport {
     pub tick: Tick,
     pub received: u64,
     pub served: u64,
     pub dropped: u64,
     pub revenue: u64,
+    pub completed_services: Vec<ServiceId>,
 }
 
 #[cfg(test)]

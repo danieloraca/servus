@@ -10,6 +10,8 @@ The repository is a Cargo workspace split into:
 
 The current vertical slice supports deterministic ticks, positional infrastructure construction,
 map bounds and occupancy, traffic capacity, dropped requests, and revenue.
+Infrastructure reserves map space while under construction and contributes capacity only after
+its construction timer completes.
 
 ## Development
 
