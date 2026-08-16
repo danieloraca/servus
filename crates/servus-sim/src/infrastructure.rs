@@ -39,7 +39,16 @@ pub struct ServiceProfile {
     pub capacities: [u64; 3],
     pub construction_ticks: u16,
     pub footprint: Footprint,
-    pub serves_requests: bool,
+    pub role: ServiceRole,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ServiceRole {
+    Ingress,
+    Transit,
+    Application,
+    PersistentStore,
+    Cache,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -111,7 +120,7 @@ impl ServiceKind {
             capacities: [250, 600, 1_500],
             construction_ticks: 1,
             footprint: Footprint::new(1, 1),
-            serves_requests: false,
+            role: ServiceRole::Ingress,
         },
         ServiceProfile {
             build_cost: 125,
@@ -121,7 +130,7 @@ impl ServiceKind {
             capacities: [200, 450, 1_000],
             construction_ticks: 2,
             footprint: Footprint::new(1, 1),
-            serves_requests: false,
+            role: ServiceRole::Transit,
         },
         ServiceProfile {
             build_cost: 75,
@@ -131,7 +140,7 @@ impl ServiceKind {
             capacities: [150, 350, 800],
             construction_ticks: 2,
             footprint: Footprint::new(1, 1),
-            serves_requests: false,
+            role: ServiceRole::Transit,
         },
         ServiceProfile {
             build_cost: 100,
@@ -141,7 +150,7 @@ impl ServiceKind {
             capacities: [100, 225, 500],
             construction_ticks: 3,
             footprint: Footprint::new(1, 1),
-            serves_requests: true,
+            role: ServiceRole::Application,
         },
         ServiceProfile {
             build_cost: 180,
@@ -151,7 +160,7 @@ impl ServiceKind {
             capacities: [80, 200, 480],
             construction_ticks: 4,
             footprint: Footprint::new(2, 2),
-            serves_requests: false,
+            role: ServiceRole::PersistentStore,
         },
         ServiceProfile {
             build_cost: 120,
@@ -161,7 +170,7 @@ impl ServiceKind {
             capacities: [160, 420, 1_000],
             construction_ticks: 3,
             footprint: Footprint::new(1, 1),
-            serves_requests: false,
+            role: ServiceRole::PersistentStore,
         },
         ServiceProfile {
             build_cost: 70,
@@ -171,7 +180,7 @@ impl ServiceKind {
             capacities: [220, 550, 1_300],
             construction_ticks: 2,
             footprint: Footprint::new(1, 1),
-            serves_requests: false,
+            role: ServiceRole::Cache,
         },
     ];
 
@@ -217,7 +226,17 @@ impl ServiceKind {
 
     #[must_use]
     pub const fn serves_requests(self) -> bool {
-        self.profile().serves_requests
+        matches!(self.profile().role, ServiceRole::Application)
+    }
+
+    #[must_use]
+    pub const fn is_persistent_store(self) -> bool {
+        matches!(self.profile().role, ServiceRole::PersistentStore)
+    }
+
+    #[must_use]
+    pub const fn is_cache(self) -> bool {
+        matches!(self.profile().role, ServiceRole::Cache)
     }
 
     #[must_use]

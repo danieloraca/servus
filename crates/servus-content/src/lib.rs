@@ -49,17 +49,17 @@ impl ContentCatalog {
                 ServiceDefinition {
                     kind: ServiceKind::RelationalDatabase,
                     display_name: "Relational Database".to_owned(),
-                    description: "Structured transactional storage, similar to Amazon Aurora, Azure SQL, or Cloud SQL.".to_owned(),
+                    description: "Persistent transactional storage. Connect App → Database; its operation capacity limits stateful requests. Similar to Amazon Aurora, Azure SQL, or Cloud SQL.".to_owned(),
                 },
                 ServiceDefinition {
                     kind: ServiceKind::KeyValueStore,
                     display_name: "Key-Value Store".to_owned(),
-                    description: "Highly scalable low-latency records, similar to DynamoDB, Cosmos DB, or Firestore.".to_owned(),
+                    description: "Persistent scalable records. Connect App → Store for a higher-throughput stateful solution. Similar to DynamoDB, Cosmos DB, or Firestore.".to_owned(),
                 },
                 ServiceDefinition {
                     kind: ServiceKind::Cache,
                     display_name: "Cache".to_owned(),
-                    description: "Fast temporary data that reduces pressure on databases, similar to ElastiCache, Azure Managed Redis, or Memorystore.".to_owned(),
+                    description: "Fast temporary data. Connect App → Cache → Database to absorb 50% of reads. Similar to ElastiCache, Azure Managed Redis, or Memorystore.".to_owned(),
                 },
             ],
         }

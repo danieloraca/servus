@@ -36,7 +36,11 @@ expensive, slow to construct, and occupies 2×2 tiles; a Key-Value Store trades 
 greater throughput; a Cache is cheap and fast but represents temporary data. These generic names
 map to real-world families such as Aurora/Azure SQL/Cloud SQL, DynamoDB/Cosmos DB/Firestore, and
 ElastiCache/Azure Managed Redis/Memorystore. Their workload-specific persistence and caching effects
-will build on the catalog in a later slice.
+are modeled with directed links. An Application Server with a path to a Relational Database or
+Key-Value Store becomes stateful, and the store's capacity limits completed requests. Route
+`App → Cache → Database` to serve a deterministic 50% of reads from cache, reducing database work.
+If a configured database or required cache path is unavailable, the stateful workload cannot
+silently fall back to stateless operation.
 
 The Bevy client starts a playable empty-map scenario and renders infrastructure states, directed
 connections, live simulation metrics, and objectives in a native window. A separate deterministic

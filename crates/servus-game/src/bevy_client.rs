@@ -489,7 +489,7 @@ fn select_building(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>)
         tool.selected = kind;
         tool.network_mode = None;
         tool.connection_from = None;
-        tool.feedback = format!("Selected {}", service_kind_name(kind));
+        tool.feedback = selection_feedback(kind);
     }
 }
 
@@ -507,7 +507,7 @@ fn toggle_network_mode(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTo
         tool.feedback = match tool.network_mode {
             Some(NetworkMode::Connect) => "Connection mode: click the source service".to_owned(),
             Some(NetworkMode::Disconnect) => "Disconnect mode: click the source service".to_owned(),
-            None => format!("Selected {}", service_kind_name(tool.selected)),
+            None => selection_feedback(tool.selected),
         };
     } else if keys.just_pressed(KeyCode::Escape) && tool.network_mode.is_some() {
         tool.network_mode = None;
@@ -1555,6 +1555,19 @@ fn service_kind_name(kind: ServiceKind) -> &'static str {
     }
 }
 
+fn selection_feedback(kind: ServiceKind) -> String {
+    let hint = match kind {
+        ServiceKind::InternetGateway => "start an incoming traffic path",
+        ServiceKind::Firewall => "route every ingress path through it",
+        ServiceKind::LoadBalancer => "place it before multiple app servers",
+        ServiceKind::ApplicationServer => "connect traffic here for a stateless solution",
+        ServiceKind::RelationalDatabase => "connect App → SQL for persistent state",
+        ServiceKind::KeyValueStore => "connect App → KV for scalable persistent state",
+        ServiceKind::Cache => "connect App → Cache → Database for 50% cache hits",
+    };
+    format!("Selected {} — {hint}", service_kind_name(kind))
+}
+
 fn build_preview_color(style: VisualStyle, valid: bool) -> Color {
     if valid {
         let [red, green, blue] = style.color;
@@ -1628,6 +1641,8 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let demand = simulation.traffic().requests_per_tick();
     let served = report.map_or(0, |report| report.served);
     let dropped = report.map_or(0, |report| report.dropped);
+    let database_requests = report.map_or(0, |report| report.database_requests);
+    let cache_hits = report.map_or(0, |report| report.cache_hits);
     let mode = if let Some(network_mode) = tool.network_mode {
         let action = match network_mode {
             NetworkMode::Connect => "Connect",
@@ -1656,12 +1671,14 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let objectives = objectives_text(client);
     let build_menu = build_menu_text();
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n{build_menu}C  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nDB requests  {:>6}\nCache hits   {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n{build_menu}C  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
         served,
         dropped,
+        database_requests,
+        cache_hits,
         client.total_served,
         client.blocked_attacks,
         client.successful_failovers,
@@ -1861,6 +1878,12 @@ mod tests {
         assert_ne!(gateway, load_balancer);
         assert_eq!(invalid_gateway, invalid_load_balancer);
         assert_ne!(gateway, invalid_gateway);
+    }
+
+    #[test]
+    fn data_service_selection_explains_directional_wiring() {
+        assert!(selection_feedback(ServiceKind::RelationalDatabase).contains("App → SQL"));
+        assert!(selection_feedback(ServiceKind::Cache).contains("App → Cache → Database"));
     }
 
     #[test]

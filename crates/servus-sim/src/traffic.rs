@@ -51,6 +51,8 @@ pub struct TickReport {
     pub net_income: i128,
     pub completed_services: Vec<ServiceId>,
     pub link_traffic: Vec<LinkTraffic>,
+    pub database_requests: u64,
+    pub cache_hits: u64,
     pub cyberattack: Option<CyberAttackReport>,
 }
 

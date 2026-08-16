@@ -2,9 +2,13 @@ use std::collections::VecDeque;
 
 use crate::{LinkTraffic, Network, Service, ServiceId, ServiceKind};
 
+pub const CACHE_HIT_PERCENT: u64 = 50;
+
 pub(crate) struct RoutingResult {
     pub served: u64,
     pub link_traffic: Vec<LinkTraffic>,
+    pub database_requests: u64,
+    pub cache_hits: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -30,8 +34,22 @@ pub(crate) fn route_requests(
         return RoutingResult {
             served: 0,
             link_traffic: Vec::new(),
+            database_requests: 0,
+            cache_hits: 0,
         };
     }
+
+    let stateful_apps: Vec<ServiceId> = services
+        .iter()
+        .filter(|service| {
+            service.kind().serves_requests()
+                && services.iter().any(|store| {
+                    store.kind().is_persistent_store()
+                        && is_reachable(service.id(), store.id(), services, network)
+                })
+        })
+        .map(|service| service.id())
+        .collect();
 
     let source = 0;
     let sink = 1;
@@ -41,12 +59,25 @@ pub(crate) fn route_requests(
     for (index, service) in services.iter().enumerate() {
         let input = service_input(index);
         let output = service_output(index);
-        add_edge(&mut graph, input, output, service.traffic_capacity(demand));
+        let mut capacity = service.traffic_capacity(demand);
+        if service.kind().is_persistent_store()
+            && store_has_active_cache(service.id(), &stateful_apps, services, network)
+        {
+            capacity = capacity.saturating_mul(2);
+        }
+        add_edge(&mut graph, input, output, capacity);
 
         if service.kind() == ServiceKind::InternetGateway {
             add_edge(&mut graph, source, input, demand);
         }
-        if service.kind().serves_requests() {
+        if service.kind().serves_requests() && !stateful_apps.contains(&service.id()) {
+            add_edge(&mut graph, output, sink, demand);
+        }
+        if service.kind().is_persistent_store()
+            && stateful_apps
+                .iter()
+                .any(|app| is_reachable(*app, service.id(), services, network))
+        {
             add_edge(&mut graph, output, sink, demand);
         }
     }
@@ -61,15 +92,29 @@ pub(crate) fn route_requests(
         };
         let from_node = service_output(from);
         let edge_index = add_edge(&mut graph, from_node, service_input(to), demand);
-        tracked_links.push((*link, from_node, edge_index));
+        tracked_links.push((*link, from, to, from_node, edge_index));
     }
 
     let served = maximum_flow(&mut graph, source, sink, demand);
+    let mut database_requests = 0_u64;
+    let mut cache_hits = 0_u64;
     let link_traffic = tracked_links
         .into_iter()
-        .filter_map(|(link, from_node, edge_index)| {
+        .filter_map(|(link, from, to, from_node, edge_index)| {
             let edge = &graph[from_node][edge_index];
-            let requests = edge.initial_capacity - edge.residual;
+            let routed = edge.initial_capacity - edge.residual;
+            let to_store = services[to].kind().is_persistent_store();
+            let from_cache = services[from].kind().is_cache();
+            let requests = if to_store && from_cache {
+                let misses = routed.saturating_mul(100 - CACHE_HIT_PERCENT).div_ceil(100);
+                cache_hits = cache_hits.saturating_add(routed - misses);
+                misses
+            } else {
+                routed
+            };
+            if to_store {
+                database_requests = database_requests.saturating_add(requests);
+            }
             (requests > 0).then_some(LinkTraffic {
                 from: link.from,
                 to: link.to,
@@ -80,7 +125,51 @@ pub(crate) fn route_requests(
     RoutingResult {
         served,
         link_traffic,
+        database_requests,
+        cache_hits,
     }
+}
+
+fn store_has_active_cache(
+    store: ServiceId,
+    stateful_apps: &[ServiceId],
+    services: &[Service],
+    network: &Network,
+) -> bool {
+    services.iter().any(|cache| {
+        cache.kind().is_cache()
+            && cache.is_operational()
+            && network
+                .links()
+                .iter()
+                .any(|link| link.from == cache.id() && link.to == store)
+            && stateful_apps
+                .iter()
+                .any(|app| is_reachable(*app, cache.id(), services, network))
+    })
+}
+
+fn is_reachable(
+    from: ServiceId,
+    target: ServiceId,
+    services: &[Service],
+    network: &Network,
+) -> bool {
+    let mut visited = vec![from];
+    let mut queue = VecDeque::from([from]);
+    while let Some(current) = queue.pop_front() {
+        for link in network.links().iter().filter(|link| link.from == current) {
+            if link.to == target {
+                return true;
+            }
+            if services.iter().any(|service| service.id() == link.to) && !visited.contains(&link.to)
+            {
+                visited.push(link.to);
+                queue.push_back(link.to);
+            }
+        }
+    }
+    false
 }
 
 fn maximum_flow(graph: &mut [Vec<FlowEdge>], source: usize, sink: usize, limit: u64) -> u64 {
@@ -320,5 +409,118 @@ mod tests {
                 requests: 80,
             }]
         );
+    }
+
+    #[test]
+    fn relational_database_limits_a_stateful_application() {
+        let services = vec![
+            operational_service(1, ServiceKind::InternetGateway),
+            operational_service(2, ServiceKind::ApplicationServer),
+            operational_service(3, ServiceKind::RelationalDatabase),
+        ];
+        let mut network = Network::default();
+        connect(&mut network, 1, 2);
+        connect(&mut network, 2, 3);
+
+        let result = route_requests(100, &services, &network);
+        assert_eq!(result.served, 80);
+        assert_eq!(result.database_requests, 80);
+        assert_eq!(result.cache_hits, 0);
+        assert_eq!(
+            result.link_traffic,
+            vec![
+                LinkTraffic {
+                    from: ServiceId::new(1),
+                    to: ServiceId::new(2),
+                    requests: 80,
+                },
+                LinkTraffic {
+                    from: ServiceId::new(2),
+                    to: ServiceId::new(3),
+                    requests: 80,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cache_serves_half_of_stateful_reads_before_the_database() {
+        let services = vec![
+            operational_service(1, ServiceKind::InternetGateway),
+            operational_service(2, ServiceKind::ApplicationServer),
+            operational_service(3, ServiceKind::Cache),
+            operational_service(4, ServiceKind::RelationalDatabase),
+        ];
+        let mut network = Network::default();
+        connect(&mut network, 1, 2);
+        connect(&mut network, 2, 3);
+        connect(&mut network, 3, 4);
+
+        let result = route_requests(100, &services, &network);
+        assert_eq!(result.served, 100);
+        assert_eq!(result.database_requests, 50);
+        assert_eq!(result.cache_hits, 50);
+        assert_eq!(
+            result.link_traffic.last(),
+            Some(&LinkTraffic {
+                from: ServiceId::new(3),
+                to: ServiceId::new(4),
+                requests: 50,
+            })
+        );
+    }
+
+    #[test]
+    fn configured_stateful_app_stops_when_its_database_is_not_operational() {
+        let services = vec![
+            operational_service(1, ServiceKind::InternetGateway),
+            operational_service(2, ServiceKind::ApplicationServer),
+            Service::new(
+                ServiceId::new(3),
+                ServiceKind::RelationalDatabase,
+                GridPosition::new(3, 0),
+            ),
+        ];
+        let mut network = Network::default();
+        connect(&mut network, 1, 2);
+        connect(&mut network, 2, 3);
+
+        let result = route_requests(100, &services, &network);
+        assert_eq!(result.served, 0);
+        assert_eq!(result.database_requests, 0);
+        assert_eq!(result.cache_hits, 0);
+    }
+
+    #[test]
+    fn database_cannot_serve_internet_traffic_without_an_application() {
+        let services = vec![
+            operational_service(1, ServiceKind::InternetGateway),
+            operational_service(2, ServiceKind::RelationalDatabase),
+        ];
+        let mut network = Network::default();
+        connect(&mut network, 1, 2);
+
+        assert_eq!(route_requests(100, &services, &network).served, 0);
+    }
+
+    #[test]
+    fn cache_outage_breaks_a_solution_that_requires_its_cache_path() {
+        let mut cache = operational_service(3, ServiceKind::Cache);
+        assert!(cache.disrupt(2));
+        let services = vec![
+            operational_service(1, ServiceKind::InternetGateway),
+            operational_service(2, ServiceKind::ApplicationServer),
+            cache,
+            operational_service(4, ServiceKind::RelationalDatabase),
+        ];
+        let mut network = Network::default();
+        connect(&mut network, 1, 2);
+        connect(&mut network, 2, 3);
+        connect(&mut network, 3, 4);
+
+        let result = route_requests(100, &services, &network);
+        assert_eq!(result.served, 0);
+        assert_eq!(result.database_requests, 0);
+        assert_eq!(result.cache_hits, 0);
     }
 }

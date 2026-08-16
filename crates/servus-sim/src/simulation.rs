@@ -224,6 +224,8 @@ impl Simulation {
             net_income,
             completed_services,
             link_traffic: routing.link_traffic,
+            database_requests: routing.database_requests,
+            cache_hits: routing.cache_hits,
             cyberattack,
         }
     }
