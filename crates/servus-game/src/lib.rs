@@ -1,5 +1,7 @@
+mod bevy_client;
 mod render;
 
+pub use bevy_client::run_bevy_client;
 pub use render::render_simulation;
 
 use servus_content::ContentCatalog;
@@ -36,6 +38,12 @@ pub struct DemoResult {
     pub remaining_credits: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DemoScenario {
+    pub simulation: Simulation,
+    pub placements: Vec<DemoPlacement>,
+}
+
 #[derive(Debug)]
 pub enum DemoError {
     InvalidMapSize(MapSizeError),
@@ -61,6 +69,26 @@ impl std::error::Error for DemoError {
 }
 
 pub fn run_demo() -> Result<DemoResult, DemoError> {
+    let DemoScenario {
+        mut simulation,
+        placements,
+    } = create_demo_scenario()?;
+    let server_kind = ServiceKind::ApplicationServer;
+    let mut frames = Vec::new();
+    for _ in 0..server_kind.construction_ticks() {
+        let report = simulation.advance();
+        let view = render_simulation(&simulation, Some(&report));
+        frames.push(DemoFrame { report, view });
+    }
+
+    Ok(DemoResult {
+        placements,
+        frames,
+        remaining_credits: simulation.budget().credits(),
+    })
+}
+
+pub fn create_demo_scenario() -> Result<DemoScenario, DemoError> {
     let catalog = ContentCatalog::builtin();
     let server_kind = ServiceKind::ApplicationServer;
     let gateway_kind = ServiceKind::InternetGateway;
@@ -86,14 +114,8 @@ pub fn run_demo() -> Result<DemoResult, DemoError> {
             .apply(GameCommand::ConnectServices { from, to })
             .map_err(DemoError::Command)?;
     }
-    let mut frames = Vec::new();
-    for _ in 0..server_kind.construction_ticks() {
-        let report = simulation.advance();
-        let view = render_simulation(&simulation, Some(&report));
-        frames.push(DemoFrame { report, view });
-    }
-
-    Ok(DemoResult {
+    Ok(DemoScenario {
+        simulation,
         placements: vec![
             DemoPlacement {
                 name: service_name(&catalog, gateway_kind),
@@ -112,8 +134,6 @@ pub fn run_demo() -> Result<DemoResult, DemoError> {
                 position: DEMO_SERVER_TWO_POSITION,
             },
         ],
-        frames,
-        remaining_credits: simulation.budget().credits(),
     })
 }
 
@@ -171,6 +191,15 @@ mod tests {
         assert!(result.frames[2].view.contains("3 |.....A..|"));
         assert!(result.frames[2].view.contains("5 |.....A..|"));
         assert_eq!(result.remaining_credits, 195);
+    }
+
+    #[test]
+    fn demo_scenario_starts_before_the_first_tick() {
+        let scenario = create_demo_scenario().expect("the scenario is valid");
+        assert_eq!(scenario.simulation.tick().number(), 0);
+        assert_eq!(scenario.simulation.services().len(), 4);
+        assert_eq!(scenario.simulation.network().links().len(), 3);
+        assert_eq!(scenario.placements.len(), 4);
     }
 
     #[test]
