@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResolution};
 use servus_sim::{
     CommandOutcome, FoundationKind, GameCommand, GridPosition, MapSize, ServiceId, ServiceKind,
-    ServiceState, ServiceTier, Simulation,
+    ServiceState, ServiceTier, Simulation, SolutionId,
 };
 
 const FLOOR_HEIGHT: f32 = 0.72;
@@ -12,6 +12,7 @@ const FLOOR_GAP: f32 = 0.08;
 const BUILDING_WIDTH: f32 = 4.0;
 const BASE_HEIGHT: f32 = 0.5;
 const TICK_SECONDS: f32 = 1.0;
+const CITY_TILE: f32 = 2.7;
 
 #[derive(Resource)]
 struct PrototypeSimulation {
@@ -22,11 +23,35 @@ struct PrototypeSimulation {
 #[derive(Resource, Default)]
 struct SelectedFloor(Option<ServiceId>);
 
+#[derive(Resource)]
+struct PrototypeBuildTool {
+    action: PrototypeBuildAction,
+    feedback: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrototypeBuildAction {
+    Foundation(FoundationKind),
+    Service(ServiceKind),
+}
+
 #[derive(Component)]
 struct Floor3d {
     service: ServiceId,
     bounds: Bounds3d,
 }
+
+#[derive(Component)]
+struct Solution3d {
+    solution: SolutionId,
+    bounds: Bounds3d,
+}
+
+#[derive(Component)]
+struct PrototypeBuildButton(PrototypeBuildAction);
+
+#[derive(Component)]
+struct PrototypeFeedback;
 
 #[derive(Component)]
 struct PrototypeStatus;
@@ -45,6 +70,10 @@ pub fn run_3d_client() {
             timer: Timer::from_seconds(TICK_SECONDS, TimerMode::Repeating),
         })
         .insert_resource(SelectedFloor::default())
+        .insert_resource(PrototypeBuildTool {
+            action: PrototypeBuildAction::Foundation(FoundationKind::SmallLot),
+            feedback: "Choose a lot, then click the city grid".to_owned(),
+        })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Servus — 3D City Prototype".into(),
@@ -58,6 +87,9 @@ pub fn run_3d_client() {
         .add_systems(
             Update,
             (
+                handle_build_palette,
+                place_from_build_tool,
+                sync_3d_scene,
                 select_floor,
                 upgrade_selected_floor,
                 advance_prototype,
@@ -71,38 +103,16 @@ pub fn run_3d_client() {
 }
 
 fn prototype_simulation() -> Simulation {
-    let mut simulation = Simulation::new(
+    Simulation::new(
         3_000,
         0,
         MapSize::new(8, 8).expect("prototype map dimensions are valid"),
-    );
-    let outcome = simulation
-        .apply(GameCommand::BuildSolution {
-            foundation: FoundationKind::TowerLot,
-            position: GridPosition::new(3, 3),
-        })
-        .expect("prototype foundation is affordable");
-    let CommandOutcome::SolutionBuilt { id: solution, .. } = outcome else {
-        unreachable!("foundation command returns a solution")
-    };
-    for kind in [
-        ServiceKind::InternetGateway,
-        ServiceKind::Firewall,
-        ServiceKind::LoadBalancer,
-        ServiceKind::ApplicationServer,
-        ServiceKind::MessageQueue,
-        ServiceKind::RelationalDatabase,
-    ] {
-        simulation
-            .apply(GameCommand::InstallService { solution, kind })
-            .expect("prototype floor is affordable and fits the tower");
-    }
-    simulation
+    )
 }
 
 fn setup_3d(
     mut commands: Commands,
-    prototype: Res<PrototypeSimulation>,
+    _prototype: Res<PrototypeSimulation>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -134,36 +144,7 @@ fn setup_3d(
     spawn_grid(&mut commands, &mut meshes, &mut materials);
 
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(
-            BUILDING_WIDTH + 0.5,
-            BASE_HEIGHT,
-            BUILDING_WIDTH + 0.5,
-        ))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.18, 0.24, 0.28),
-            metallic: 0.35,
-            perceptual_roughness: 0.5,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, BASE_HEIGHT / 2.0, 0.0),
-    ));
-
-    for (floor, service) in prototype.simulation.services().iter().enumerate() {
-        let center = floor_center(floor);
-        let bounds = floor_bounds(floor, service.tier());
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(BUILDING_WIDTH, FLOOR_HEIGHT, BUILDING_WIDTH))),
-            MeshMaterial3d(materials.add(floor_material(service.kind()))),
-            Transform::from_translation(center),
-            Floor3d {
-                service: service.id(),
-                bounds,
-            },
-        ));
-    }
-
-    commands.spawn((
-        Text::new("SERVUS 3D PROTOTYPE\n\nClick a floor to inspect it\nU  Upgrade selected floor\nDrag  Orbit camera\nMouse wheel  Zoom"),
+        Text::new("SERVUS 3D\n\nLeft-click  Build\nRight-click floor  Inspect\nU  Upgrade inspected floor\nDrag  Orbit camera\nMouse wheel  Zoom"),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.85, 0.93, 1.0)),
         Node {
@@ -191,6 +172,97 @@ fn setup_3d(
         BackgroundColor(Color::srgba(0.035, 0.065, 0.1, 0.94)),
         PrototypeStatus,
     ));
+    commands.spawn((
+        Text::new("Choose a lot, then click the city grid"),
+        TextFont::from_font_size(14.0),
+        TextColor(Color::srgb(0.95, 0.82, 0.35)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(305.0),
+            top: Val::Px(20.0),
+            right: Val::Px(325.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        PrototypeFeedback,
+    ));
+    spawn_build_palette(&mut commands);
+}
+
+fn spawn_build_palette(commands: &mut Commands) {
+    let actions = [
+        (
+            "SMALL LOT\n100c",
+            PrototypeBuildAction::Foundation(FoundationKind::SmallLot),
+        ),
+        (
+            "TOWER LOT\n250c",
+            PrototypeBuildAction::Foundation(FoundationKind::TowerLot),
+        ),
+        (
+            "MEGATOWER\n500c",
+            PrototypeBuildAction::Foundation(FoundationKind::MegatowerLot),
+        ),
+        (
+            "GW\n50c",
+            PrototypeBuildAction::Service(ServiceKind::InternetGateway),
+        ),
+        (
+            "FW\n125c",
+            PrototypeBuildAction::Service(ServiceKind::Firewall),
+        ),
+        (
+            "LB\n75c",
+            PrototypeBuildAction::Service(ServiceKind::LoadBalancer),
+        ),
+        (
+            "APP\n100c",
+            PrototypeBuildAction::Service(ServiceKind::ApplicationServer),
+        ),
+        (
+            "QUEUE\n90c",
+            PrototypeBuildAction::Service(ServiceKind::MessageQueue),
+        ),
+        (
+            "SQL\n180c",
+            PrototypeBuildAction::Service(ServiceKind::RelationalDatabase),
+        ),
+    ];
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(300.0),
+                right: Val::Px(315.0),
+                bottom: Val::Px(20.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                column_gap: Val::Px(6.0),
+                row_gap: Val::Px(6.0),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.035, 0.065, 0.1, 0.96)),
+            ZIndex(20),
+        ))
+        .with_children(|row| {
+            for (label, action) in actions {
+                row.spawn((
+                    Button,
+                    Node {
+                        padding: UiRect::axes(Val::Px(8.0), Val::Px(7.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.08, 0.16, 0.24)),
+                    PrototypeBuildButton(action),
+                ))
+                .with_child((
+                    Text::new(label),
+                    TextFont::from_font_size(11.0),
+                    TextColor(Color::WHITE),
+                ));
+            }
+        });
 }
 
 fn spawn_grid(
@@ -224,6 +296,180 @@ fn spawn_grid(
     }
 }
 
+fn handle_build_palette(
+    mut tool: ResMut<PrototypeBuildTool>,
+    mut buttons: Query<(&Interaction, &PrototypeBuildButton, &mut BackgroundColor)>,
+) {
+    for (interaction, button, mut background) in &mut buttons {
+        if *interaction == Interaction::Pressed {
+            tool.action = button.0;
+            tool.feedback = match button.0 {
+                PrototypeBuildAction::Foundation(foundation) => format!(
+                    "{} selected — click an empty grid area",
+                    foundation_name(foundation)
+                ),
+                PrototypeBuildAction::Service(kind) => {
+                    format!("{} selected — click a building", kind_name(kind))
+                }
+            };
+        }
+        background.0 = if tool.action == button.0 {
+            Color::srgb(0.08, 0.48, 0.72)
+        } else if *interaction == Interaction::Hovered {
+            Color::srgb(0.15, 0.38, 0.55)
+        } else {
+            Color::srgb(0.08, 0.16, 0.24)
+        };
+    }
+}
+
+fn place_from_build_tool(
+    mouse: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera3d>>,
+    buttons: Query<&Interaction, With<PrototypeBuildButton>>,
+    solutions: Query<&Solution3d>,
+    mut prototype: ResMut<PrototypeSimulation>,
+    mut tool: ResMut<PrototypeBuildTool>,
+) {
+    if !mouse.just_pressed(MouseButton::Left)
+        || buttons
+            .iter()
+            .any(|interaction| *interaction != Interaction::None)
+    {
+        return;
+    }
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let (camera, camera_transform) = *camera;
+    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor) else {
+        return;
+    };
+    match tool.action {
+        PrototypeBuildAction::Foundation(foundation) => {
+            let Some(world) = ray_ground_intersection(ray.origin, *ray.direction) else {
+                return;
+            };
+            let Some(position) = world_to_city_grid(prototype.simulation.map().size(), world)
+            else {
+                tool.feedback = "Build inside the marked city grid".to_owned();
+                return;
+            };
+            match prototype.simulation.apply(GameCommand::BuildSolution {
+                foundation,
+                position,
+            }) {
+                Ok(CommandOutcome::SolutionBuilt { id, .. }) => {
+                    tool.feedback = format!(
+                        "Built {} #{} — select a service below",
+                        foundation_name(foundation),
+                        id.value()
+                    );
+                    tool.action = PrototypeBuildAction::Service(ServiceKind::InternetGateway);
+                }
+                Ok(_) => unreachable!("foundation command returns a foundation outcome"),
+                Err(error) => tool.feedback = format!("Cannot place lot: {error}"),
+            }
+        }
+        PrototypeBuildAction::Service(kind) => {
+            let target = solutions
+                .iter()
+                .filter_map(|solution| {
+                    ray_aabb_distance(ray.origin, *ray.direction, solution.bounds)
+                        .map(|distance| (distance, solution.solution))
+                })
+                .min_by(|left, right| left.0.total_cmp(&right.0))
+                .map(|(_, solution)| solution);
+            let Some(solution) = target else {
+                tool.feedback = "Click a building to install this service".to_owned();
+                return;
+            };
+            match prototype
+                .simulation
+                .apply(GameCommand::InstallService { solution, kind })
+            {
+                Ok(CommandOutcome::ServiceInstalled { id, .. }) => {
+                    tool.feedback =
+                        format!("Installed {} as floor #{}", kind_name(kind), id.value());
+                }
+                Ok(_) => unreachable!("install command returns an installation outcome"),
+                Err(error) => tool.feedback = format!("Cannot install service: {error}"),
+            }
+        }
+    }
+}
+
+fn sync_3d_scene(
+    mut commands: Commands,
+    prototype: Res<PrototypeSimulation>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut solution_visuals: Query<&mut Solution3d>,
+    floor_visuals: Query<&Floor3d>,
+) {
+    let map_size = prototype.simulation.map().size();
+    for solution in prototype.simulation.solutions() {
+        let center = solution_world_center(map_size, solution.position(), solution.foundation());
+        let footprint = solution.foundation().footprint();
+        let width = f32::from(footprint.width()) * CITY_TILE - 0.25;
+        let depth = f32::from(footprint.height()) * CITY_TILE - 0.25;
+        let building_height =
+            BASE_HEIGHT + solution.floor_count() as f32 * (FLOOR_HEIGHT + FLOOR_GAP);
+        let bounds = Bounds3d {
+            min: center + Vec3::new(-width / 2.0, 0.0, -depth / 2.0),
+            max: center + Vec3::new(width / 2.0, building_height, depth / 2.0),
+        };
+        if let Some(mut visual) = solution_visuals
+            .iter_mut()
+            .find(|visual| visual.solution == solution.id())
+        {
+            visual.bounds = bounds;
+        } else {
+            commands.spawn((
+                Mesh3d(meshes.add(Cuboid::new(width, BASE_HEIGHT, depth))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.18, 0.24, 0.28),
+                    metallic: 0.35,
+                    perceptual_roughness: 0.5,
+                    ..default()
+                })),
+                Transform::from_translation(center + Vec3::Y * BASE_HEIGHT / 2.0),
+                Solution3d {
+                    solution: solution.id(),
+                    bounds,
+                },
+            ));
+        }
+        for (floor, service_id) in solution.services().iter().enumerate() {
+            if floor_visuals
+                .iter()
+                .any(|visual| visual.service == *service_id)
+            {
+                continue;
+            }
+            let Some(service) = prototype.simulation.service(*service_id) else {
+                continue;
+            };
+            let floor_center = center + floor_center(floor);
+            let local_bounds = floor_bounds(floor, service.tier());
+            let bounds = Bounds3d {
+                min: local_bounds.min + center,
+                max: local_bounds.max + center,
+            };
+            commands.spawn((
+                Mesh3d(meshes.add(Cuboid::new(width - 0.2, FLOOR_HEIGHT, depth - 0.2))),
+                MeshMaterial3d(materials.add(floor_material(service.kind()))),
+                Transform::from_translation(floor_center),
+                Floor3d {
+                    service: service.id(),
+                    bounds,
+                },
+            ));
+        }
+    }
+}
+
 fn select_floor(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -231,7 +477,7 @@ fn select_floor(
     floors: Query<&Floor3d>,
     mut selected: ResMut<SelectedFloor>,
 ) {
-    if !mouse.just_pressed(MouseButton::Left) {
+    if !mouse.just_pressed(MouseButton::Right) {
         return;
     }
     let Some(cursor) = window.cursor_position() else {
@@ -312,8 +558,11 @@ fn update_floor_appearance(
 fn update_prototype_status(
     prototype: Res<PrototypeSimulation>,
     selected: Res<SelectedFloor>,
+    tool: Res<PrototypeBuildTool>,
     mut status: Single<&mut Text, With<PrototypeStatus>>,
+    mut feedback: Single<&mut Text, (With<PrototypeFeedback>, Without<PrototypeStatus>)>,
 ) {
+    **feedback = Text::new(tool.feedback.clone());
     let Some(service) = selected.0.and_then(|id| prototype.simulation.service(id)) else {
         **status = Text::new("FLOOR INSPECTOR\n\nClick a building floor");
         return;
@@ -338,6 +587,50 @@ fn update_prototype_status(
         upgrade,
         prototype.simulation.budget().credits(),
     ));
+}
+
+fn ray_ground_intersection(origin: Vec3, direction: Vec3) -> Option<Vec3> {
+    if direction.y.abs() < f32::EPSILON {
+        return None;
+    }
+    let distance = -origin.y / direction.y;
+    (distance >= 0.0).then_some(origin + direction * distance)
+}
+
+fn city_grid_to_world(map_size: MapSize, position: GridPosition) -> Vec3 {
+    let center_x = (f32::from(map_size.width()) - 1.0) / 2.0;
+    let center_z = (f32::from(map_size.height()) - 1.0) / 2.0;
+    Vec3::new(
+        (f32::from(position.x) - center_x) * CITY_TILE,
+        0.0,
+        (f32::from(position.y) - center_z) * CITY_TILE,
+    )
+}
+
+fn world_to_city_grid(map_size: MapSize, world: Vec3) -> Option<GridPosition> {
+    let center_x = (f32::from(map_size.width()) - 1.0) / 2.0;
+    let center_z = (f32::from(map_size.height()) - 1.0) / 2.0;
+    let x = (world.x / CITY_TILE + center_x).round();
+    let y = (world.z / CITY_TILE + center_z).round();
+    if x < 0.0 || y < 0.0 || x >= f32::from(map_size.width()) || y >= f32::from(map_size.height()) {
+        return None;
+    }
+    Some(GridPosition::new(x as u16, y as u16))
+}
+
+fn solution_world_center(
+    map_size: MapSize,
+    position: GridPosition,
+    foundation: FoundationKind,
+) -> Vec3 {
+    let origin = city_grid_to_world(map_size, position);
+    let footprint = foundation.footprint();
+    origin
+        + Vec3::new(
+            (f32::from(footprint.width()) - 1.0) * CITY_TILE / 2.0,
+            0.0,
+            (f32::from(footprint.height()) - 1.0) * CITY_TILE / 2.0,
+        )
 }
 
 fn orbit_camera(
@@ -454,6 +747,14 @@ fn kind_name(kind: ServiceKind) -> &'static str {
     }
 }
 
+fn foundation_name(foundation: FoundationKind) -> &'static str {
+    match foundation {
+        FoundationKind::SmallLot => "Small Lot",
+        FoundationKind::TowerLot => "Tower Lot",
+        FoundationKind::MegatowerLot => "Megatower Lot",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,17 +786,43 @@ mod tests {
     }
 
     #[test]
-    fn prototype_uses_real_solution_and_service_data() {
-        let simulation = prototype_simulation();
+    fn prototype_starts_empty_and_accepts_real_build_commands() {
+        let mut simulation = prototype_simulation();
+        assert!(simulation.solutions().is_empty());
+        let outcome = simulation
+            .apply(GameCommand::BuildSolution {
+                foundation: FoundationKind::SmallLot,
+                position: GridPosition::new(2, 2),
+            })
+            .expect("prototype lot is affordable");
+        let CommandOutcome::SolutionBuilt { id, .. } = outcome else {
+            panic!("foundation command must build a solution")
+        };
+        simulation
+            .apply(GameCommand::InstallService {
+                solution: id,
+                kind: ServiceKind::InternetGateway,
+            })
+            .expect("prototype service is affordable");
         assert_eq!(simulation.solutions().len(), 1);
-        assert_eq!(simulation.services().len(), 6);
+        assert_eq!(simulation.services().len(), 1);
+    }
+
+    #[test]
+    fn city_grid_coordinates_round_trip_through_3d_space() {
+        let size = MapSize::new(8, 8).expect("test map is valid");
+        for y in 0..size.height() {
+            for x in 0..size.width() {
+                let position = GridPosition::new(x, y);
+                assert_eq!(
+                    world_to_city_grid(size, city_grid_to_world(size, position)),
+                    Some(position)
+                );
+            }
+        }
         assert_eq!(
-            simulation.services()[0].kind(),
-            ServiceKind::InternetGateway
-        );
-        assert_eq!(
-            simulation.services()[5].kind(),
-            ServiceKind::RelationalDatabase
+            ray_ground_intersection(Vec3::new(1.0, 5.0, 2.0), -Vec3::Y),
+            Some(Vec3::new(1.0, 0.0, 2.0))
         );
     }
 }
