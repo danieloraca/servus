@@ -5,7 +5,7 @@ edition.workspace = true
 default-run = "servus-game"
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["2d", "default_font", "ui"] }
+bevy = { version = "0.19", default-features = false, features = ["2d", "bevy_pbr", "default_font", "ui"] }
 rodio = { version = "0.20.1", default-features = false, features = ["wav"] }
 servus-content = { path = "../servus-content" }
 servus-sim = { path = "../servus-sim" }

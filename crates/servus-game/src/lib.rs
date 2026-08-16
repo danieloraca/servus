@@ -1,9 +1,11 @@
 mod audio;
 mod bevy_client;
 mod render;
+mod three_d_client;
 
 pub use bevy_client::run_bevy_client;
 pub use render::render_simulation;
+pub use three_d_client::run_3d_client;
 
 use servus_content::ContentCatalog;
 use servus_sim::{
