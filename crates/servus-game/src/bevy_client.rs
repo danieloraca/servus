@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResolution};
@@ -20,6 +22,7 @@ const MAX_CAMERA_SCALE: f32 = 2.0;
 const DEMAND_STEP: u64 = 50;
 const MAX_DEMAND: u64 = 1_000;
 const SERVED_OBJECTIVE: u64 = 500;
+const NOTIFICATION_SECONDS: f32 = 3.0;
 
 #[derive(Resource)]
 struct ClientSimulation {
@@ -35,6 +38,9 @@ struct ServiceVisual(ServiceId);
 
 #[derive(Component)]
 struct MetricsText;
+
+#[derive(Component)]
+struct NotificationText;
 
 #[derive(Resource)]
 struct BuildTool {
@@ -92,6 +98,32 @@ struct ObjectiveStatus {
     complete: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProgressEvent {
+    None,
+    Completed(Vec<&'static str>),
+    Victory,
+}
+
+#[derive(Resource)]
+struct GameProgress {
+    completed: [bool; 5],
+    won: bool,
+    notification: Option<String>,
+    notification_timer: Timer,
+}
+
+impl GameProgress {
+    fn new() -> Self {
+        Self {
+            completed: [false; 5],
+            won: false,
+            notification: None,
+            notification_timer: Timer::from_seconds(NOTIFICATION_SECONDS, TimerMode::Once),
+        }
+    }
+}
+
 pub fn run_bevy_client() {
     let simulation = create_new_game().expect("the new-game map dimensions must be valid");
 
@@ -112,6 +144,7 @@ pub fn run_bevy_client() {
             inspected: None,
             feedback: "Select with 1–3, then click a free tile".to_owned(),
         })
+        .insert_resource(GameProgress::new())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Servus — Infrastructure Strategy".into(),
@@ -125,6 +158,7 @@ pub fn run_bevy_client() {
         .add_systems(
             Update,
             (
+                restart_game,
                 toggle_pause,
                 select_building,
                 toggle_connection_mode,
@@ -133,6 +167,7 @@ pub fn run_bevy_client() {
                 advance_simulation,
                 update_service_visuals,
                 update_metrics,
+                update_notification,
             )
                 .chain(),
         )
@@ -142,6 +177,7 @@ pub fn run_bevy_client() {
                 update_hovered_tile,
                 inspect_service,
                 handle_map_click,
+                update_objective_progress,
                 draw_map,
             )
                 .chain()
@@ -175,9 +211,7 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new(
-            "WASD: move   Wheel: zoom   1–3: build   C: connect   -/+: demand   Right-click: inspect",
-        ),
+        Text::new("WASD: move   Wheel: zoom   1–3: build   C: connect   -/+: demand   R: restart"),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -186,6 +220,21 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
             bottom: Val::Px(24.0),
             ..default()
         },
+    ));
+
+    commands.spawn((
+        Text::new(""),
+        TextFont::from_font_size(24.0),
+        TextColor(Color::srgb(1.0, 0.88, 0.35)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(24.0),
+            left: Val::Percent(31.0),
+            right: Val::Percent(5.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        NotificationText,
     ));
 }
 
@@ -211,8 +260,36 @@ fn spawn_service_visual(commands: &mut Commands, map_size: MapSize, service: Ser
         });
 }
 
-fn toggle_pause(keys: Res<ButtonInput<KeyCode>>, mut client: ResMut<ClientSimulation>) {
-    if keys.just_pressed(KeyCode::Space) {
+fn restart_game(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    service_visuals: Query<Entity, With<ServiceVisual>>,
+    mut client: ResMut<ClientSimulation>,
+    mut tool: ResMut<BuildTool>,
+    mut progress: ResMut<GameProgress>,
+    camera: Single<(&mut Transform, &mut Projection), With<Camera2d>>,
+) {
+    if !keys.just_pressed(KeyCode::KeyR) {
+        return;
+    }
+    for entity in &service_visuals {
+        commands.entity(entity).despawn();
+    }
+    reset_scenario(&mut client, &mut tool, &mut progress);
+
+    let (mut transform, mut projection) = camera.into_inner();
+    transform.translation = Vec3::ZERO;
+    if let Projection::Orthographic(orthographic) = &mut *projection {
+        orthographic.scale = 1.0;
+    }
+}
+
+fn toggle_pause(
+    keys: Res<ButtonInput<KeyCode>>,
+    progress: Res<GameProgress>,
+    mut client: ResMut<ClientSimulation>,
+) {
+    if keys.just_pressed(KeyCode::Space) && !progress.won {
         client.paused = !client.paused;
     }
 }
@@ -407,9 +484,16 @@ fn update_service_visuals(
 fn update_metrics(
     client: Res<ClientSimulation>,
     tool: Res<BuildTool>,
+    progress: Res<GameProgress>,
     mut text: Single<&mut Text, With<MetricsText>>,
 ) {
-    let status = if client.paused { "PAUSED" } else { "RUNNING" };
+    let status = if progress.won {
+        "VICTORY"
+    } else if client.paused {
+        "PAUSED"
+    } else {
+        "RUNNING"
+    };
     **text = Text::new(metrics_text(&client, &tool, status));
 }
 
@@ -792,6 +876,90 @@ fn objectives_text(client: &ClientSimulation) -> String {
     format!("OBJECTIVES\n{}", lines.join("\n"))
 }
 
+fn apply_objective_progress(
+    progress: &mut GameProgress,
+    statuses: [ObjectiveStatus; 5],
+) -> ProgressEvent {
+    let newly_completed = statuses
+        .iter()
+        .enumerate()
+        .filter_map(|(index, objective)| {
+            (objective.complete && !progress.completed[index]).then_some(objective.label)
+        })
+        .collect::<Vec<_>>();
+    for (completed, objective) in progress.completed.iter_mut().zip(statuses) {
+        *completed = objective.complete;
+    }
+
+    if progress.completed.iter().all(|complete| *complete) && !progress.won {
+        progress.won = true;
+        ProgressEvent::Victory
+    } else if newly_completed.is_empty() {
+        ProgressEvent::None
+    } else {
+        ProgressEvent::Completed(newly_completed)
+    }
+}
+
+fn update_objective_progress(
+    mut client: ResMut<ClientSimulation>,
+    mut progress: ResMut<GameProgress>,
+) {
+    let event = apply_objective_progress(&mut progress, objective_statuses(&client));
+    match event {
+        ProgressEvent::None => {}
+        ProgressEvent::Completed(labels) => {
+            progress.notification = Some(format!("Objective complete: {}", labels.join(", ")));
+            progress.notification_timer.reset();
+        }
+        ProgressEvent::Victory => {
+            client.paused = true;
+            progress.notification = Some("VICTORY — resilient solution online!".to_owned());
+            progress.notification_timer.reset();
+        }
+    }
+}
+
+fn update_notification(
+    time: Res<Time>,
+    mut progress: ResMut<GameProgress>,
+    mut text: Single<&mut Text, With<NotificationText>>,
+) {
+    tick_notification(&mut progress, time.delta());
+    **text = Text::new(progress.notification.clone().unwrap_or_default());
+}
+
+fn tick_notification(progress: &mut GameProgress, delta: Duration) {
+    if progress.notification.is_some() && !progress.won {
+        progress.notification_timer.tick(delta);
+        if progress.notification_timer.just_finished() {
+            progress.notification = None;
+        }
+    }
+}
+
+fn reset_scenario(
+    client: &mut ClientSimulation,
+    tool: &mut BuildTool,
+    progress: &mut GameProgress,
+) {
+    client.simulation = create_new_game().expect("the new-game map dimensions must be valid");
+    client.last_report = None;
+    client.tick_timer = Timer::from_seconds(TICK_SECONDS, TimerMode::Repeating);
+    client.paused = false;
+    client.total_served = 0;
+
+    tool.selected = ServiceKind::ApplicationServer;
+    tool.hovered = None;
+    tool.connecting = false;
+    tool.connection_from = None;
+    tool.inspected = None;
+    tool.feedback = "Scenario restarted; select with 1–3".to_owned();
+
+    *progress = GameProgress::new();
+    progress.notification = Some("Scenario restarted".to_owned());
+}
+
 fn visual_style(kind: ServiceKind) -> VisualStyle {
     match kind {
         ServiceKind::InternetGateway => VisualStyle {
@@ -859,7 +1027,7 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     let objectives = objectives_text(client);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -1182,6 +1350,116 @@ mod tests {
                 .all(|objective| objective.complete)
         );
         assert!(objectives_text(&client).contains("[x] Serve 500 total requests"));
+    }
+
+    #[test]
+    fn objective_progress_emits_each_completion_once_then_victory() {
+        let mut progress = GameProgress::new();
+        let partial = [
+            ObjectiveStatus {
+                label: "one",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "two",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "three",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "four",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "five",
+                complete: false,
+            },
+        ];
+        assert_eq!(
+            apply_objective_progress(&mut progress, partial),
+            ProgressEvent::Completed(vec!["one", "two", "three", "four"])
+        );
+        assert_eq!(
+            apply_objective_progress(&mut progress, partial),
+            ProgressEvent::None
+        );
+
+        let complete = partial.map(|mut objective| {
+            objective.complete = true;
+            objective
+        });
+        assert_eq!(
+            apply_objective_progress(&mut progress, complete),
+            ProgressEvent::Victory
+        );
+        assert!(progress.won);
+        assert_eq!(
+            apply_objective_progress(&mut progress, complete),
+            ProgressEvent::None
+        );
+    }
+
+    #[test]
+    fn ordinary_notifications_expire_but_victory_persists() {
+        let mut progress = GameProgress::new();
+        progress.notification = Some("Objective complete".to_owned());
+        tick_notification(&mut progress, Duration::from_secs(2));
+        assert_eq!(progress.notification.as_deref(), Some("Objective complete"));
+        tick_notification(&mut progress, Duration::from_secs(1));
+        assert_eq!(progress.notification, None);
+
+        progress.notification = Some("VICTORY".to_owned());
+        progress.won = true;
+        tick_notification(&mut progress, Duration::from_secs(30));
+        assert_eq!(progress.notification.as_deref(), Some("VICTORY"));
+    }
+
+    #[test]
+    fn restart_restores_every_piece_of_scenario_state() {
+        let scenario = create_demo_scenario().expect("demo scenario is valid");
+        let inspected = scenario.simulation.services()[0].id();
+        let mut client = ClientSimulation {
+            simulation: scenario.simulation,
+            last_report: Some(
+                create_demo_scenario()
+                    .expect("demo scenario is valid")
+                    .simulation
+                    .advance(),
+            ),
+            tick_timer: Timer::from_seconds(9.0, TimerMode::Repeating),
+            paused: true,
+            total_served: 900,
+        };
+        let mut tool = BuildTool {
+            selected: ServiceKind::InternetGateway,
+            hovered: Some(GridPosition::new(1, 1)),
+            connecting: true,
+            connection_from: Some(inspected),
+            inspected: Some(inspected),
+            feedback: "Old state".to_owned(),
+        };
+        let mut progress = GameProgress::new();
+        progress.completed = [true; 5];
+        progress.won = true;
+        progress.notification = Some("VICTORY".to_owned());
+
+        reset_scenario(&mut client, &mut tool, &mut progress);
+
+        assert!(client.simulation.services().is_empty());
+        assert_eq!(client.simulation.budget().credits(), 500);
+        assert_eq!(client.simulation.traffic().requests_per_tick(), 100);
+        assert_eq!(client.last_report, None);
+        assert!(!client.paused);
+        assert_eq!(client.total_served, 0);
+        assert_eq!(tool.selected, ServiceKind::ApplicationServer);
+        assert!(!tool.connecting);
+        assert_eq!(tool.connection_from, None);
+        assert_eq!(tool.inspected, None);
+        assert_eq!(progress.completed, [false; 5]);
+        assert!(!progress.won);
+        assert_eq!(progress.notification.as_deref(), Some("Scenario restarted"));
     }
 
     #[test]

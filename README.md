@@ -40,4 +40,5 @@ In the graphical client:
 - watch yellow request markers follow the exact traffic routed through each link;
 - use - and + to decrease or increase incoming demand by 50 requests per tick;
 - move the camera with WASD or the arrow keys and zoom with the mouse wheel;
-- press Space to pause or resume simulation ticks.
+- press Space to pause or resume simulation ticks;
+- complete all objectives to reach victory, or press R to restart the scenario.
