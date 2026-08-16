@@ -17,6 +17,8 @@ engine.
 Incoming traffic now requires a directed, fully operational path from an Internet Gateway to an
 Application Server. Network links have their own construction cost and are shown in the terminal
 view.
+A Load Balancer can distribute traffic to several servers, but its own throughput can become the
+solution's bottleneck.
 
 ## Development
 

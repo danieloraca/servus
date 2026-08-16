@@ -30,6 +30,12 @@ impl ContentCatalog {
                         .to_owned(),
                 },
                 ServiceDefinition {
+                    kind: ServiceKind::LoadBalancer,
+                    display_name: "Load Balancer".to_owned(),
+                    description: "Distributes incoming traffic across downstream services."
+                        .to_owned(),
+                },
+                ServiceDefinition {
                     kind: ServiceKind::ApplicationServer,
                     display_name: "Application Server".to_owned(),
                     description: "Runs application code and handles incoming requests.".to_owned(),

@@ -36,8 +36,14 @@ engine client without changing game rules.
 
 Network links are directed edges between existing services. Links can be configured while either
 endpoint is under construction, but traffic traverses only operational services. Every tick begins
-at all operational Internet Gateways and walks reachable links; only reachable operational
-services contribute request capacity. Cycles are supported and visited at most once per tick.
+at all operational Internet Gateways and can reach request-serving infrastructure only through
+operational intermediate services.
 
 Link validation and payment occur atomically. Unknown endpoints, self-connections, duplicates, and
 unaffordable links leave the complete simulation state unchanged.
+
+Traffic capacity is calculated as a deterministic maximum-flow problem. Each operational service
+is split into input and output nodes with the service's throughput as the connecting capacity.
+Internet Gateways act as sources and Application Servers as sinks. This makes shared Load
+Balancers, branches, multi-hop paths, and cycles obey every intermediate bottleneck without
+double-counting downstream capacity.

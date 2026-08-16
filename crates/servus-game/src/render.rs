@@ -6,6 +6,8 @@ const APPLICATION_SERVER_BUILDING: char = 'a';
 const APPLICATION_SERVER_OPERATIONAL: char = 'A';
 const INTERNET_GATEWAY_BUILDING: char = 'g';
 const INTERNET_GATEWAY_OPERATIONAL: char = 'G';
+const LOAD_BALANCER_BUILDING: char = 'l';
+const LOAD_BALANCER_OPERATIONAL: char = 'L';
 const EMPTY_TILE: char = '.';
 const INVALID_OCCUPANT: char = '?';
 
@@ -49,8 +51,9 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
     }
     write_border(&mut output, row_label_width, size.width());
 
-    output
-        .push_str("Legend: g/G=Internet Gateway, a/A=Application Server (building/operational)\n");
+    output.push_str(
+        "Legend: g/G=Gateway, l/L=Load Balancer, a/A=App Server (building/operational)\n",
+    );
     write_network_links(&mut output, simulation);
     if let Some(report) = report {
         writeln!(
@@ -73,6 +76,10 @@ fn service_symbol(service: &Service) -> char {
             INTERNET_GATEWAY_BUILDING
         }
         (ServiceKind::InternetGateway, ServiceState::Operational) => INTERNET_GATEWAY_OPERATIONAL,
+        (ServiceKind::LoadBalancer, ServiceState::UnderConstruction { .. }) => {
+            LOAD_BALANCER_BUILDING
+        }
+        (ServiceKind::LoadBalancer, ServiceState::Operational) => LOAD_BALANCER_OPERATIONAL,
         (ServiceKind::ApplicationServer, ServiceState::UnderConstruction { .. }) => {
             APPLICATION_SERVER_BUILDING
         }
@@ -153,7 +160,7 @@ mod tests {
                 "0 |...|\n",
                 "1 |...|\n",
                 "  +---+\n",
-                "Legend: g/G=Internet Gateway, a/A=Application Server (building/operational)\n",
+                "Legend: g/G=Gateway, l/L=Load Balancer, a/A=App Server (building/operational)\n",
                 "Links: none\n",
                 "Traffic: awaiting first tick\n",
             )
@@ -186,6 +193,22 @@ mod tests {
     fn coordinate_headers_repeat_decimal_digits_for_wide_maps() {
         let simulation = simulation(12, 1, 0);
         assert!(render_simulation(&simulation, None).contains("   012345678901\n"));
+    }
+
+    #[test]
+    fn load_balancer_symbol_changes_when_construction_completes() {
+        let mut simulation = simulation(3, 2, 75);
+        simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::LoadBalancer,
+                position: GridPosition::new(1, 0),
+            })
+            .expect("test load balancer is affordable and valid");
+
+        assert!(render_simulation(&simulation, None).contains("0 |.l.|"));
+        simulation.advance();
+        simulation.advance();
+        assert!(render_simulation(&simulation, None).contains("0 |.L.|"));
     }
 
     #[test]

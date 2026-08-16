@@ -42,13 +42,6 @@ impl Network {
     pub(crate) fn add_link(&mut self, from: ServiceId, to: ServiceId) {
         self.links.push(NetworkLink { from, to });
     }
-
-    pub(crate) fn outgoing(&self, from: ServiceId) -> impl Iterator<Item = ServiceId> + '_ {
-        self.links
-            .iter()
-            .filter(move |link| link.from == from)
-            .map(|link| link.to)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,7 +85,6 @@ mod tests {
 
         assert!(network.has_link(first, second));
         assert!(!network.has_link(second, first));
-        assert_eq!(network.outgoing(first).collect::<Vec<_>>(), vec![second]);
         assert_eq!(
             network.links(),
             &[NetworkLink {

@@ -20,32 +20,45 @@ impl ServiceId {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ServiceKind {
     InternetGateway,
+    LoadBalancer,
     ApplicationServer,
 }
 
 impl ServiceKind {
-    pub const ALL: [Self; 2] = [Self::InternetGateway, Self::ApplicationServer];
+    pub const ALL: [Self; 3] = [
+        Self::InternetGateway,
+        Self::LoadBalancer,
+        Self::ApplicationServer,
+    ];
 
     #[must_use]
     pub const fn build_cost(self) -> u64 {
         match self {
             Self::InternetGateway => 50,
+            Self::LoadBalancer => 75,
             Self::ApplicationServer => 100,
         }
     }
 
     #[must_use]
-    pub const fn request_capacity(self) -> u64 {
+    pub const fn traffic_capacity(self) -> Option<u64> {
         match self {
-            Self::InternetGateway => 0,
-            Self::ApplicationServer => 100,
+            Self::InternetGateway => None,
+            Self::LoadBalancer => Some(150),
+            Self::ApplicationServer => Some(100),
         }
+    }
+
+    #[must_use]
+    pub const fn serves_requests(self) -> bool {
+        matches!(self, Self::ApplicationServer)
     }
 
     #[must_use]
     pub const fn construction_ticks(self) -> u16 {
         match self {
             Self::InternetGateway => 1,
+            Self::LoadBalancer => 2,
             Self::ApplicationServer => 3,
         }
     }
@@ -54,6 +67,7 @@ impl ServiceKind {
     pub const fn footprint(self) -> Footprint {
         match self {
             Self::InternetGateway => Footprint::new(1, 1),
+            Self::LoadBalancer => Footprint::new(1, 1),
             Self::ApplicationServer => Footprint::new(1, 1),
         }
     }
@@ -131,10 +145,14 @@ impl Service {
     }
 
     #[must_use]
-    pub const fn request_capacity(self) -> u64 {
+    pub const fn traffic_capacity(self, unbounded_capacity: u64) -> u64 {
         match self.state {
             ServiceState::UnderConstruction { .. } => 0,
-            ServiceState::Operational => self.kind.request_capacity(),
+            ServiceState::Operational => match self.kind.traffic_capacity() {
+                Some(capacity) if capacity < unbounded_capacity => capacity,
+                Some(_) => unbounded_capacity,
+                None => unbounded_capacity,
+            },
         }
     }
 
@@ -163,7 +181,8 @@ mod tests {
     fn application_server_has_an_initial_cost_and_capacity() {
         let kind = ServiceKind::ApplicationServer;
         assert_eq!(kind.build_cost(), 100);
-        assert_eq!(kind.request_capacity(), 100);
+        assert_eq!(kind.traffic_capacity(), Some(100));
+        assert!(kind.serves_requests());
         assert_eq!(kind.construction_ticks(), 3);
     }
 
@@ -171,10 +190,20 @@ mod tests {
     fn internet_gateway_is_cheap_and_does_not_handle_application_requests() {
         let kind = ServiceKind::InternetGateway;
         assert_eq!(kind.build_cost(), 50);
-        assert_eq!(kind.request_capacity(), 0);
+        assert_eq!(kind.traffic_capacity(), None);
+        assert!(!kind.serves_requests());
         assert_eq!(kind.construction_ticks(), 1);
         assert_eq!(kind.footprint().width(), 1);
         assert_eq!(kind.footprint().height(), 1);
+    }
+
+    #[test]
+    fn load_balancer_has_less_capacity_than_two_application_servers() {
+        let kind = ServiceKind::LoadBalancer;
+        assert_eq!(kind.build_cost(), 75);
+        assert_eq!(kind.traffic_capacity(), Some(150));
+        assert!(!kind.serves_requests());
+        assert_eq!(kind.construction_ticks(), 2);
     }
 
     #[test]
@@ -188,14 +217,18 @@ mod tests {
             service.state(),
             ServiceState::UnderConstruction { ticks_remaining: 3 }
         );
-        assert_eq!(service.request_capacity(), 0);
+        assert_eq!(service.traffic_capacity(500), 0);
     }
 
     #[test]
     fn all_lists_every_constructible_service_kind() {
         assert_eq!(
             ServiceKind::ALL,
-            [ServiceKind::InternetGateway, ServiceKind::ApplicationServer]
+            [
+                ServiceKind::InternetGateway,
+                ServiceKind::LoadBalancer,
+                ServiceKind::ApplicationServer
+            ]
         );
     }
 
@@ -219,10 +252,10 @@ mod tests {
             ServiceState::UnderConstruction { ticks_remaining: 2 }
         );
         assert!(!service.advance_construction());
-        assert_eq!(service.request_capacity(), 0);
+        assert_eq!(service.traffic_capacity(500), 0);
         assert!(service.advance_construction());
         assert_eq!(service.state(), ServiceState::Operational);
-        assert_eq!(service.request_capacity(), 100);
+        assert_eq!(service.traffic_capacity(500), 100);
         assert!(service.is_operational());
         assert!(!service.advance_construction());
     }

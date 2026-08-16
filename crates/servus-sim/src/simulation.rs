@@ -1,8 +1,6 @@
-use std::collections::VecDeque;
-
 use crate::{
     Budget, CommandError, CommandOutcome, GameCommand, GridMap, MapSize, NETWORK_LINK_COST,
-    Network, NetworkError, Service, ServiceId, ServiceKind, Tick, TickReport, Traffic,
+    Network, NetworkError, Service, ServiceId, Tick, TickReport, Traffic,
 };
 
 const REVENUE_PER_SERVED_REQUEST: u64 = 1;
@@ -130,15 +128,7 @@ impl Simulation {
             .collect();
 
         let received = self.traffic.requests_per_tick();
-        let reachable = self.reachable_operational_services();
-        let capacity = self
-            .services
-            .iter()
-            .filter(|service| reachable.contains(&service.id()))
-            .fold(0_u64, |total, service| {
-                total.saturating_add(service.request_capacity())
-            });
-        let served = received.min(capacity);
+        let served = crate::routing::served_requests(received, &self.services, &self.network);
         let dropped = received - served;
         let revenue = served.saturating_mul(REVENUE_PER_SERVED_REQUEST);
         self.budget.credit(revenue);
@@ -151,32 +141,6 @@ impl Simulation {
             revenue,
             completed_services,
         }
-    }
-
-    fn reachable_operational_services(&self) -> Vec<ServiceId> {
-        let mut reachable = Vec::new();
-        let mut queue = VecDeque::new();
-
-        for service in self.services.iter().filter(|service| {
-            service.kind() == ServiceKind::InternetGateway && service.is_operational()
-        }) {
-            reachable.push(service.id());
-            queue.push_back(service.id());
-        }
-
-        while let Some(from) = queue.pop_front() {
-            for to in self.network.outgoing(from) {
-                let Some(service) = self.service(to) else {
-                    continue;
-                };
-                if service.is_operational() && !reachable.contains(&to) {
-                    reachable.push(to);
-                    queue.push_back(to);
-                }
-            }
-        }
-
-        reachable
     }
 }
 
@@ -483,26 +447,28 @@ mod tests {
 
     #[test]
     fn traffic_traversal_handles_multi_hop_paths_and_cycles() {
-        let mut simulation = Simulation::new(280, 250, map_size());
+        let mut simulation = Simulation::new(365, 250, map_size());
         let gateway = build(
             &mut simulation,
             ServiceKind::InternetGateway,
             position(0, 0),
         );
+        let load_balancer = build(&mut simulation, ServiceKind::LoadBalancer, position(1, 0));
         let first_server = build(
-            &mut simulation,
-            ServiceKind::ApplicationServer,
-            position(1, 0),
-        );
-        let second_server = build(
             &mut simulation,
             ServiceKind::ApplicationServer,
             position(2, 0),
         );
+        let second_server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(3, 0),
+        );
         for (from, to) in [
-            (gateway, first_server),
-            (first_server, second_server),
-            (second_server, gateway),
+            (gateway, load_balancer),
+            (load_balancer, first_server),
+            (load_balancer, second_server),
+            (second_server, load_balancer),
         ] {
             simulation
                 .apply(GameCommand::ConnectServices { from, to })
@@ -513,8 +479,8 @@ mod tests {
             report = simulation.advance();
         }
 
-        assert_eq!(report.served, 200);
-        assert_eq!(report.dropped, 50);
+        assert_eq!(report.served, 150);
+        assert_eq!(report.dropped, 100);
     }
 
     #[test]

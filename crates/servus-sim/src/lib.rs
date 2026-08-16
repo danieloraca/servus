@@ -6,6 +6,7 @@ mod economy;
 mod infrastructure;
 mod map;
 mod network;
+mod routing;
 mod simulation;
 mod traffic;
 
