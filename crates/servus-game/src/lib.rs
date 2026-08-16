@@ -1,3 +1,7 @@
+mod render;
+
+pub use render::render_simulation;
+
 use servus_content::ContentCatalog;
 use servus_sim::{
     CommandError, CommandOutcome, GameCommand, GridPosition, MapSize, MapSizeError, ServiceKind,
@@ -11,11 +15,17 @@ pub const DEMO_MAP_HEIGHT: u16 = 8;
 pub const DEMO_SERVER_POSITION: GridPosition = GridPosition::new(3, 4);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DemoFrame {
+    pub report: TickReport,
+    pub view: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DemoResult {
     pub service_name: String,
     pub service_position: GridPosition,
     pub service_state: ServiceState,
-    pub report: TickReport,
+    pub frames: Vec<DemoFrame>,
     pub remaining_credits: u64,
 }
 
@@ -61,7 +71,12 @@ pub fn run_demo() -> Result<DemoResult, DemoError> {
         })
         .map_err(DemoError::Command)?;
     let CommandOutcome::ServiceBuilt { id, .. } = outcome;
-    let report = simulation.advance();
+    let mut frames = Vec::new();
+    for _ in 0..kind.construction_ticks() {
+        let report = simulation.advance();
+        let view = render_simulation(&simulation, Some(&report));
+        frames.push(DemoFrame { report, view });
+    }
     let service_state = simulation
         .service(id)
         .expect("a successful build command creates its service")
@@ -71,7 +86,7 @@ pub fn run_demo() -> Result<DemoResult, DemoError> {
         service_name,
         service_position: DEMO_SERVER_POSITION,
         service_state,
-        report,
+        frames,
         remaining_credits: simulation.budget().credits(),
     })
 }
@@ -83,20 +98,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn demo_builds_a_server_and_processes_one_tick() {
+    fn demo_shows_construction_becoming_operational() {
         let result = run_demo().expect("the demo starts with enough construction credits");
         assert_eq!(result.service_name, "Application Server");
         assert_eq!(result.service_position, GridPosition::new(3, 4));
-        assert_eq!(
-            result.service_state,
-            ServiceState::UnderConstruction { ticks_remaining: 2 }
-        );
-        assert_eq!(result.report.tick.number(), 1);
-        assert_eq!(result.report.received, 140);
-        assert_eq!(result.report.served, 0);
-        assert_eq!(result.report.dropped, 140);
-        assert!(result.report.completed_services.is_empty());
-        assert_eq!(result.remaining_credits, 150);
+        assert_eq!(result.service_state, ServiceState::Operational);
+        assert_eq!(result.frames.len(), 3);
+        assert_eq!(result.frames[0].report.tick.number(), 1);
+        assert_eq!(result.frames[0].report.served, 0);
+        assert!(result.frames[0].view.contains("4 |...a....|"));
+        assert_eq!(result.frames[1].report.served, 0);
+        assert_eq!(result.frames[2].report.served, 100);
+        assert_eq!(result.frames[2].report.dropped, 40);
+        assert_eq!(result.frames[2].report.completed_services.len(), 1);
+        assert!(result.frames[2].view.contains("4 |...A....|"));
+        assert_eq!(result.remaining_credits, 250);
     }
 
     #[test]

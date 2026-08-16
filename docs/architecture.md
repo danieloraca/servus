@@ -27,3 +27,7 @@ Construction reserves a service's complete footprint immediately. New services b
 remaining construction time decreases; services reaching zero become `Operational` before that
 tick's traffic is processed. The tick report includes the IDs of completed services so a client
 can trigger visuals and notifications without reconstructing state changes.
+
+The current terminal renderer lives in `servus-game` and reads only the simulation's public API.
+It has no influence on simulation state, so it can later be replaced or accompanied by a graphical
+engine client without changing game rules.
