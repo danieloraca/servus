@@ -17,4 +17,4 @@ pub use infrastructure::{Service, ServiceId, ServiceKind, ServiceState};
 pub use map::{Footprint, GridMap, GridPosition, MapSize, MapSizeError, PlacementError};
 pub use network::{NETWORK_LINK_COST, Network, NetworkError, NetworkLink};
 pub use simulation::Simulation;
-pub use traffic::{TickReport, Traffic};
+pub use traffic::{LinkTraffic, TickReport, Traffic};

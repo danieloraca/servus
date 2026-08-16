@@ -1,5 +1,12 @@
 use crate::{ServiceId, Tick};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinkTraffic {
+    pub from: ServiceId,
+    pub to: ServiceId,
+    pub requests: u64,
+}
+
 /// Incoming demand for a solution during every simulation tick.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Traffic {
@@ -31,6 +38,7 @@ pub struct TickReport {
     pub dropped: u64,
     pub revenue: u64,
     pub completed_services: Vec<ServiceId>,
+    pub link_traffic: Vec<LinkTraffic>,
 }
 
 #[cfg(test)]

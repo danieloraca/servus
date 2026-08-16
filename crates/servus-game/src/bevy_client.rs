@@ -36,6 +36,7 @@ struct BuildTool {
     hovered: Option<GridPosition>,
     connecting: bool,
     connection_from: Option<ServiceId>,
+    inspected: Option<ServiceId>,
     feedback: String,
 }
 
@@ -95,6 +96,7 @@ pub fn run_bevy_client() {
             hovered: None,
             connecting: false,
             connection_from: None,
+            inspected: None,
             feedback: "Select with 1–3, then click a free tile".to_owned(),
         })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -122,7 +124,12 @@ pub fn run_bevy_client() {
         )
         .add_systems(
             PostUpdate,
-            (update_hovered_tile, handle_map_click, draw_map)
+            (
+                update_hovered_tile,
+                inspect_service,
+                handle_map_click,
+                draw_map,
+            )
                 .chain()
                 .after(TransformSystems::Propagate),
         )
@@ -139,14 +146,14 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
 
     commands.spawn((
         Text::new("Loading controls…"),
-        TextFont::from_font_size(18.0),
+        TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.84, 0.9, 0.96)),
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(22.0),
             top: Val::Px(22.0),
             padding: UiRect::all(Val::Px(18.0)),
-            width: Val::Px(270.0),
+            width: Val::Px(300.0),
             ..default()
         },
         BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.94)),
@@ -154,7 +161,7 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD / arrows: move     Wheel: zoom     1–3: build     C: connect"),
+        Text::new("WASD: move   Wheel: zoom   1–3: build   C: connect   Right-click: inspect"),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -266,6 +273,18 @@ fn update_hovered_tile(
         .and_then(|world| world_to_grid(client.simulation.map().size(), world));
 }
 
+fn inspect_service(
+    mouse: Res<ButtonInput<MouseButton>>,
+    client: Res<ClientSimulation>,
+    mut tool: ResMut<BuildTool>,
+) {
+    if mouse.just_pressed(MouseButton::Right) {
+        tool.inspected = tool
+            .hovered
+            .and_then(|position| client.simulation.map().service_at(position));
+    }
+}
+
 fn handle_map_click(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -354,7 +373,12 @@ fn update_metrics(
     **text = Text::new(metrics_text(&client, &tool, status));
 }
 
-fn draw_map(mut gizmos: Gizmos, client: Res<ClientSimulation>, tool: Res<BuildTool>) {
+fn draw_map(
+    mut gizmos: Gizmos,
+    time: Res<Time>,
+    client: Res<ClientSimulation>,
+    tool: Res<BuildTool>,
+) {
     let simulation = &client.simulation;
     let map_size = simulation.map().size();
     let grid_color = Color::srgb(0.11, 0.18, 0.25);
@@ -403,6 +427,32 @@ fn draw_map(mut gizmos: Gizmos, client: Res<ClientSimulation>, tool: Res<BuildTo
         let start = grid_to_world(map_size, from.position());
         let end = grid_to_world(map_size, to.position());
         draw_arrow(&mut gizmos, start, end, Color::srgb(0.35, 0.75, 0.95));
+    }
+
+    if let Some(report) = &client.last_report {
+        for traffic in &report.link_traffic {
+            let (Some(from), Some(to)) = (
+                simulation.service(traffic.from),
+                simulation.service(traffic.to),
+            ) else {
+                continue;
+            };
+            let start = grid_to_world(map_size, from.position());
+            let end = grid_to_world(map_size, to.position());
+            for marker in traffic_markers(start, end, traffic.requests, time.elapsed_secs()) {
+                gizmos.circle_2d(marker, 4.5, Color::srgb(1.0, 0.84, 0.28));
+            }
+        }
+    }
+
+    if let Some(id) = tool.inspected
+        && let Some(service) = simulation.service(id)
+    {
+        gizmos.rect_2d(
+            grid_to_world(map_size, service.position()),
+            Vec2::splat(SERVICE_SIZE + 16.0),
+            Color::srgb(0.3, 0.95, 1.0),
+        );
     }
 
     if tool.connecting {
@@ -477,6 +527,27 @@ fn draw_arrow(gizmos: &mut Gizmos, start: Vec2, end: Vec2, color: Color) {
         tip - direction * arrow_length - perpendicular * arrow_width,
         color,
     );
+}
+
+fn traffic_markers(start: Vec2, end: Vec2, requests: u64, elapsed: f32) -> Vec<Vec2> {
+    if requests == 0 {
+        return Vec::new();
+    }
+    let direction = (end - start).normalize_or_zero();
+    if direction == Vec2::ZERO {
+        return Vec::new();
+    }
+    let path_start = start + direction * (SERVICE_SIZE * 0.62);
+    let path_end = end - direction * (SERVICE_SIZE * 0.62);
+    let count = usize::try_from(requests.div_ceil(50).clamp(1, 4))
+        .expect("the marker count is clamped to four");
+    (0..count)
+        .map(|index| {
+            let offset = index as f32 / count as f32;
+            let progress = (elapsed * 0.55 + offset).rem_euclid(1.0);
+            path_start.lerp(path_end, progress)
+        })
+        .collect()
 }
 
 fn grid_to_world(map_size: MapSize, position: GridPosition) -> Vec2 {
@@ -586,6 +657,53 @@ fn service_description(simulation: &Simulation, id: ServiceId) -> String {
     )
 }
 
+fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
+    let simulation = &client.simulation;
+    let service = simulation.service(id)?;
+    let position = service.position();
+    let incoming_links = simulation
+        .network()
+        .links()
+        .iter()
+        .filter(|link| link.to == id)
+        .count();
+    let outgoing_links = simulation
+        .network()
+        .links()
+        .iter()
+        .filter(|link| link.from == id)
+        .count();
+    let (incoming_traffic, outgoing_traffic) =
+        client.last_report.as_ref().map_or((0, 0), |report| {
+            report
+                .link_traffic
+                .iter()
+                .fold((0_u64, 0_u64), |totals, traffic| {
+                    (
+                        totals.0 + u64::from(traffic.to == id) * traffic.requests,
+                        totals.1 + u64::from(traffic.from == id) * traffic.requests,
+                    )
+                })
+        });
+    let capacity = service.kind().traffic_capacity().map_or_else(
+        || "unbounded".to_owned(),
+        |capacity| format!("{capacity} req/tick"),
+    );
+    Some(format!(
+        "INSPECT\n{} #{}\nTile          ({}, {})\nState         {}\nCapacity      {}\nLinks in/out  {}/{}\nFlow in/out   {}/{}",
+        service_kind_name(service.kind()),
+        id.value(),
+        position.x,
+        position.y,
+        service.state(),
+        capacity,
+        incoming_links,
+        outgoing_links,
+        incoming_traffic,
+        outgoing_traffic,
+    ))
+}
+
 fn visual_style(kind: ServiceKind) -> VisualStyle {
     match kind {
         ServiceKind::InternetGateway => VisualStyle {
@@ -647,8 +765,12 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
             tool.selected.build_cost()
         )
     };
+    let inspection = tool
+        .inspected
+        .and_then(|id| inspection_text(client, id))
+        .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     format!(
-        "SERVUS  {status}\n\nTick       {:>6}\nCredits    {:>6}\nDemand     {:>6}\nServed     {:>6}\nDropped    {:>6}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n\n{mode}\n{}\n\nSpace: pause / resume",
+        "SERVUS  {status}\n\nTick       {:>6}\nCredits    {:>6}\nDemand     {:>6}\nServed     {:>6}\nDropped    {:>6}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume",
         simulation.tick().number(),
         simulation.budget().credits(),
         received,
@@ -722,6 +844,25 @@ mod tests {
         assert!(zoom_scale(1.0, -1.0) > 1.0);
         assert_eq!(zoom_scale(1.0, 100.0), MIN_CAMERA_SCALE);
         assert_eq!(zoom_scale(1.0, -100.0), MAX_CAMERA_SCALE);
+    }
+
+    #[test]
+    fn traffic_markers_reflect_volume_and_advance_along_the_link() {
+        let start = Vec2::new(0.0, 0.0);
+        let end = Vec2::new(200.0, 0.0);
+        let first = traffic_markers(start, end, 150, 0.0);
+        let later = traffic_markers(start, end, 150, 0.5);
+        assert_eq!(first.len(), 3);
+        assert_eq!(later.len(), 3);
+        assert_ne!(first, later);
+        assert!(
+            first
+                .iter()
+                .all(|marker| marker.x > 0.0 && marker.x < 200.0)
+        );
+        assert!(first.iter().all(|marker| marker.y == 0.0));
+        assert!(traffic_markers(start, end, 0, 0.0).is_empty());
+        assert!(traffic_markers(start, start, 100, 0.0).is_empty());
     }
 
     #[test]
@@ -898,6 +1039,7 @@ mod tests {
             hovered: None,
             connecting: false,
             connection_from: None,
+            inspected: None,
             feedback: "Ready".to_owned(),
         };
         let text = metrics_text(&client, &tool, "RUNNING");
@@ -923,10 +1065,34 @@ mod tests {
             hovered: None,
             connecting: true,
             connection_from: Some(source),
+            inspected: None,
             feedback: "Choose destination".to_owned(),
         };
         let text = metrics_text(&client, &tool, "RUNNING");
         assert!(text.contains("Mode: Connect from Internet Gateway #1"));
         assert!(text.contains("Choose destination"));
+    }
+
+    #[test]
+    fn inspection_reports_service_capacity_links_and_exact_flow() {
+        let mut scenario = create_demo_scenario().expect("demo scenario is valid");
+        let mut report = scenario.simulation.advance();
+        for _ in 1..ServiceKind::ApplicationServer.construction_ticks() {
+            report = scenario.simulation.advance();
+        }
+        let inspected = scenario.simulation.services()[2].id();
+        let client = ClientSimulation {
+            simulation: scenario.simulation,
+            last_report: Some(report),
+            tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            paused: false,
+        };
+
+        let text = inspection_text(&client, inspected).expect("the inspected service exists");
+        assert!(text.contains("Application Server #3"));
+        assert!(text.contains("State         operational"));
+        assert!(text.contains("Capacity      100 req/tick"));
+        assert!(text.contains("Links in/out  1/0"));
+        assert!(text.contains("Flow in/out   100/0"));
     }
 }

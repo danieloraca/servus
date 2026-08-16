@@ -36,5 +36,7 @@ In the graphical client:
 - click a highlighted free map tile to build;
 - press C, then click a source service and destination service to create a directed connection;
 - press Escape to cancel connection mode;
+- right-click a service to inspect its state, capacity, links, and current traffic;
+- watch yellow request markers follow the exact traffic routed through each link;
 - move the camera with WASD or the arrow keys and zoom with the mouse wheel;
 - press Space to pause or resume simulation ticks.

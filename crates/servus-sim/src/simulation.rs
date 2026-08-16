@@ -128,7 +128,8 @@ impl Simulation {
             .collect();
 
         let received = self.traffic.requests_per_tick();
-        let served = crate::routing::served_requests(received, &self.services, &self.network);
+        let routing = crate::routing::route_requests(received, &self.services, &self.network);
+        let served = routing.served;
         let dropped = received - served;
         let revenue = served.saturating_mul(REVENUE_PER_SERVED_REQUEST);
         self.budget.credit(revenue);
@@ -140,6 +141,7 @@ impl Simulation {
             dropped,
             revenue,
             completed_services,
+            link_traffic: routing.link_traffic,
         }
     }
 }
@@ -481,6 +483,26 @@ mod tests {
 
         assert_eq!(report.served, 150);
         assert_eq!(report.dropped, 100);
+        assert_eq!(
+            report.link_traffic,
+            vec![
+                crate::LinkTraffic {
+                    from: gateway,
+                    to: load_balancer,
+                    requests: 150,
+                },
+                crate::LinkTraffic {
+                    from: load_balancer,
+                    to: first_server,
+                    requests: 100,
+                },
+                crate::LinkTraffic {
+                    from: load_balancer,
+                    to: second_server,
+                    requests: 50,
+                },
+            ]
+        );
     }
 
     #[test]

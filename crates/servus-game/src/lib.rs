@@ -188,6 +188,15 @@ mod tests {
         assert_eq!(result.frames[2].report.served, 150);
         assert_eq!(result.frames[2].report.dropped, 50);
         assert_eq!(result.frames[2].report.completed_services.len(), 2);
+        assert_eq!(
+            result.frames[2]
+                .report
+                .link_traffic
+                .iter()
+                .map(|traffic| (traffic.from.value(), traffic.to.value(), traffic.requests))
+                .collect::<Vec<_>>(),
+            vec![(1, 2, 150), (2, 3, 100), (2, 4, 50)]
+        );
         assert!(result.frames[2].view.contains("3 |.....A..|"));
         assert!(result.frames[2].view.contains("5 |.....A..|"));
         assert_eq!(result.remaining_credits, 195);
