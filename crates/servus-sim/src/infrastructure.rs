@@ -19,15 +19,17 @@ impl ServiceId {
 /// Infrastructure currently available to construct.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ServiceKind {
+    InternetGateway,
     ApplicationServer,
 }
 
 impl ServiceKind {
-    pub const ALL: [Self; 1] = [Self::ApplicationServer];
+    pub const ALL: [Self; 2] = [Self::InternetGateway, Self::ApplicationServer];
 
     #[must_use]
     pub const fn build_cost(self) -> u64 {
         match self {
+            Self::InternetGateway => 50,
             Self::ApplicationServer => 100,
         }
     }
@@ -35,6 +37,7 @@ impl ServiceKind {
     #[must_use]
     pub const fn request_capacity(self) -> u64 {
         match self {
+            Self::InternetGateway => 0,
             Self::ApplicationServer => 100,
         }
     }
@@ -42,6 +45,7 @@ impl ServiceKind {
     #[must_use]
     pub const fn construction_ticks(self) -> u16 {
         match self {
+            Self::InternetGateway => 1,
             Self::ApplicationServer => 3,
         }
     }
@@ -49,6 +53,7 @@ impl ServiceKind {
     #[must_use]
     pub const fn footprint(self) -> Footprint {
         match self {
+            Self::InternetGateway => Footprint::new(1, 1),
             Self::ApplicationServer => Footprint::new(1, 1),
         }
     }
@@ -121,6 +126,11 @@ impl Service {
     }
 
     #[must_use]
+    pub const fn is_operational(self) -> bool {
+        matches!(self.state, ServiceState::Operational)
+    }
+
+    #[must_use]
     pub const fn request_capacity(self) -> u64 {
         match self.state {
             ServiceState::UnderConstruction { .. } => 0,
@@ -158,6 +168,16 @@ mod tests {
     }
 
     #[test]
+    fn internet_gateway_is_cheap_and_does_not_handle_application_requests() {
+        let kind = ServiceKind::InternetGateway;
+        assert_eq!(kind.build_cost(), 50);
+        assert_eq!(kind.request_capacity(), 0);
+        assert_eq!(kind.construction_ticks(), 1);
+        assert_eq!(kind.footprint().width(), 1);
+        assert_eq!(kind.footprint().height(), 1);
+    }
+
+    #[test]
     fn a_service_exposes_its_identity_kind_and_capacity() {
         let position = GridPosition::new(3, 4);
         let service = Service::new(ServiceId::new(7), ServiceKind::ApplicationServer, position);
@@ -173,7 +193,10 @@ mod tests {
 
     #[test]
     fn all_lists_every_constructible_service_kind() {
-        assert_eq!(ServiceKind::ALL, [ServiceKind::ApplicationServer]);
+        assert_eq!(
+            ServiceKind::ALL,
+            [ServiceKind::InternetGateway, ServiceKind::ApplicationServer]
+        );
     }
 
     #[test]
@@ -200,6 +223,7 @@ mod tests {
         assert!(service.advance_construction());
         assert_eq!(service.state(), ServiceState::Operational);
         assert_eq!(service.request_capacity(), 100);
+        assert!(service.is_operational());
         assert!(!service.advance_construction());
     }
 

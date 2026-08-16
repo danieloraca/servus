@@ -1,13 +1,17 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::{BudgetError, GridPosition, PlacementError, ServiceId, ServiceKind};
+use crate::{BudgetError, GridPosition, NetworkError, PlacementError, ServiceId, ServiceKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GameCommand {
     BuildService {
         kind: ServiceKind,
         position: GridPosition,
+    },
+    ConnectServices {
+        from: ServiceId,
+        to: ServiceId,
     },
 }
 
@@ -18,12 +22,17 @@ pub enum CommandOutcome {
         kind: ServiceKind,
         position: GridPosition,
     },
+    ServicesConnected {
+        from: ServiceId,
+        to: ServiceId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandError {
     InsufficientBudget(BudgetError),
     InvalidPlacement(PlacementError),
+    InvalidNetwork(NetworkError),
 }
 
 impl fmt::Display for CommandError {
@@ -31,6 +40,7 @@ impl fmt::Display for CommandError {
         match self {
             Self::InsufficientBudget(error) => error.fmt(formatter),
             Self::InvalidPlacement(error) => error.fmt(formatter),
+            Self::InvalidNetwork(error) => error.fmt(formatter),
         }
     }
 }
@@ -40,6 +50,7 @@ impl Error for CommandError {
         match self {
             Self::InsufficientBudget(error) => Some(error),
             Self::InvalidPlacement(error) => Some(error),
+            Self::InvalidNetwork(error) => Some(error),
         }
     }
 }
@@ -68,6 +79,13 @@ mod tests {
             service_id: ServiceId::new(3),
         });
         assert_eq!(error.to_string(), "tile (1, 2) is occupied by service 3");
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn network_command_error_delegates_its_message_and_source() {
+        let error = CommandError::InvalidNetwork(NetworkError::UnknownService(ServiceId::new(9)));
+        assert_eq!(error.to_string(), "service 9 does not exist");
         assert!(error.source().is_some());
     }
 }

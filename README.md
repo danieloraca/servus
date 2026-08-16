@@ -14,6 +14,9 @@ Infrastructure reserves map space while under construction and contributes capac
 its construction timer completes.
 The executable renders a three-tick ASCII map showing that lifecycle without requiring a graphical
 engine.
+Incoming traffic now requires a directed, fully operational path from an Internet Gateway to an
+Application Server. Network links have their own construction cost and are shown in the terminal
+view.
 
 ## Development
 

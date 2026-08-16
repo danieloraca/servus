@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
+
 use crate::{
-    Budget, CommandError, CommandOutcome, GameCommand, GridMap, MapSize, Service, ServiceId, Tick,
-    TickReport, Traffic,
+    Budget, CommandError, CommandOutcome, GameCommand, GridMap, MapSize, NETWORK_LINK_COST,
+    Network, NetworkError, Service, ServiceId, ServiceKind, Tick, TickReport, Traffic,
 };
 
 const REVENUE_PER_SERVED_REQUEST: u64 = 1;
@@ -12,6 +14,7 @@ pub struct Simulation {
     budget: Budget,
     traffic: Traffic,
     map: GridMap,
+    network: Network,
     services: Vec<Service>,
     next_service_id: u64,
 }
@@ -24,6 +27,7 @@ impl Simulation {
             budget: Budget::new(starting_credits),
             traffic: Traffic::new(requests_per_tick),
             map: GridMap::new(map_size),
+            network: Network::default(),
             services: Vec::new(),
             next_service_id: 1,
         }
@@ -47,6 +51,11 @@ impl Simulation {
     #[must_use]
     pub const fn map(&self) -> &GridMap {
         &self.map
+    }
+
+    #[must_use]
+    pub const fn network(&self) -> &Network {
+        &self.network
     }
 
     pub fn set_requests_per_tick(&mut self, requests_per_tick: u64) {
@@ -81,6 +90,27 @@ impl Simulation {
 
                 Ok(CommandOutcome::ServiceBuilt { id, kind, position })
             }
+            GameCommand::ConnectServices { from, to } => {
+                if self.service(from).is_none() {
+                    return Err(CommandError::InvalidNetwork(NetworkError::UnknownService(
+                        from,
+                    )));
+                }
+                if self.service(to).is_none() {
+                    return Err(CommandError::InvalidNetwork(NetworkError::UnknownService(
+                        to,
+                    )));
+                }
+                self.network
+                    .validate_link(from, to)
+                    .map_err(CommandError::InvalidNetwork)?;
+                self.budget
+                    .spend(NETWORK_LINK_COST)
+                    .map_err(CommandError::InsufficientBudget)?;
+                self.network.add_link(from, to);
+
+                Ok(CommandOutcome::ServicesConnected { from, to })
+            }
         }
     }
 
@@ -100,9 +130,14 @@ impl Simulation {
             .collect();
 
         let received = self.traffic.requests_per_tick();
-        let capacity = self.services.iter().fold(0_u64, |total, service| {
-            total.saturating_add(service.request_capacity())
-        });
+        let reachable = self.reachable_operational_services();
+        let capacity = self
+            .services
+            .iter()
+            .filter(|service| reachable.contains(&service.id()))
+            .fold(0_u64, |total, service| {
+                total.saturating_add(service.request_capacity())
+            });
         let served = received.min(capacity);
         let dropped = received - served;
         let revenue = served.saturating_mul(REVENUE_PER_SERVED_REQUEST);
@@ -116,6 +151,32 @@ impl Simulation {
             revenue,
             completed_services,
         }
+    }
+
+    fn reachable_operational_services(&self) -> Vec<ServiceId> {
+        let mut reachable = Vec::new();
+        let mut queue = VecDeque::new();
+
+        for service in self.services.iter().filter(|service| {
+            service.kind() == ServiceKind::InternetGateway && service.is_operational()
+        }) {
+            reachable.push(service.id());
+            queue.push_back(service.id());
+        }
+
+        while let Some(from) = queue.pop_front() {
+            for to in self.network.outgoing(from) {
+                let Some(service) = self.service(to) else {
+                    continue;
+                };
+                if service.is_operational() && !reachable.contains(&to) {
+                    reachable.push(to);
+                    queue.push_back(to);
+                }
+            }
+        }
+
+        reachable
     }
 }
 
@@ -131,6 +192,30 @@ mod tests {
 
     fn position(x: u16, y: u16) -> GridPosition {
         GridPosition::new(x, y)
+    }
+
+    fn build(simulation: &mut Simulation, kind: ServiceKind, position: GridPosition) -> ServiceId {
+        match simulation
+            .apply(GameCommand::BuildService { kind, position })
+            .expect("test construction is affordable and valid")
+        {
+            CommandOutcome::ServiceBuilt { id, .. } => id,
+            CommandOutcome::ServicesConnected { .. } => {
+                panic!("a build command must produce a service")
+            }
+        }
+    }
+
+    fn build_connected_stack(simulation: &mut Simulation) -> (ServiceId, ServiceId) {
+        let gateway = build(simulation, ServiceKind::InternetGateway, position(0, 0));
+        let server = build(simulation, ServiceKind::ApplicationServer, position(1, 0));
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            })
+            .expect("test link is affordable and valid");
+        (gateway, server)
     }
 
     #[test]
@@ -214,18 +299,15 @@ mod tests {
 
     #[test]
     fn construction_must_complete_before_capacity_becomes_available() {
-        let mut simulation = Simulation::new(100, 140, map_size());
-        simulation
-            .apply(GameCommand::BuildService {
-                kind: ServiceKind::ApplicationServer,
-                position: position(0, 0),
-            })
-            .expect("the test has enough construction credits");
+        let mut simulation = Simulation::new(160, 140, map_size());
+        let (gateway, server) = build_connected_stack(&mut simulation);
+        assert!(simulation.network().has_link(gateway, server));
+        assert_eq!(simulation.budget().credits(), 0);
         let first = simulation.advance();
         assert_eq!(first.tick.number(), 1);
         assert_eq!(first.served, 0);
         assert_eq!(first.dropped, 140);
-        assert!(first.completed_services.is_empty());
+        assert_eq!(first.completed_services, vec![gateway]);
 
         let second = simulation.advance();
         assert_eq!(second.served, 0);
@@ -237,7 +319,7 @@ mod tests {
         assert_eq!(third.served, 100);
         assert_eq!(third.dropped, 40);
         assert_eq!(third.revenue, 100);
-        assert_eq!(third.completed_services, vec![ServiceId::new(1)]);
+        assert_eq!(third.completed_services, vec![server]);
         assert_eq!(simulation.budget().credits(), 100);
     }
 
@@ -253,13 +335,8 @@ mod tests {
 
     #[test]
     fn demand_can_change_between_ticks() {
-        let mut simulation = Simulation::new(100, 20, map_size());
-        simulation
-            .apply(GameCommand::BuildService {
-                kind: ServiceKind::ApplicationServer,
-                position: position(0, 0),
-            })
-            .expect("the test has enough construction credits");
+        let mut simulation = Simulation::new(160, 20, map_size());
+        build_connected_stack(&mut simulation);
         for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
             simulation.advance();
         }
@@ -268,6 +345,176 @@ mod tests {
         let report = simulation.advance();
         assert_eq!(report.received, 75);
         assert_eq!(report.served, 75);
+    }
+
+    #[test]
+    fn operational_but_disconnected_servers_cannot_receive_traffic() {
+        let mut simulation = Simulation::new(150, 80, map_size());
+        build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+
+        let mut report = simulation.advance();
+        for _ in 1..ServiceKind::ApplicationServer.construction_ticks() {
+            report = simulation.advance();
+        }
+
+        assert_eq!(report.served, 0);
+        assert_eq!(report.dropped, 80);
+        assert_eq!(
+            simulation.service(server).map(|service| service.state()),
+            Some(ServiceState::Operational)
+        );
+    }
+
+    #[test]
+    fn connecting_services_spends_credits_and_rejects_invalid_links_atomically() {
+        let mut simulation = Simulation::new(170, 0, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+
+        assert_eq!(
+            simulation.apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            }),
+            Ok(CommandOutcome::ServicesConnected {
+                from: gateway,
+                to: server,
+            })
+        );
+        assert_eq!(simulation.budget().credits(), 10);
+
+        let before_invalid_command = simulation.clone();
+        assert_eq!(
+            simulation.apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            }),
+            Err(CommandError::InvalidNetwork(NetworkError::DuplicateLink {
+                from: gateway,
+                to: server,
+            }))
+        );
+        assert_eq!(simulation, before_invalid_command);
+    }
+
+    #[test]
+    fn connections_require_existing_distinct_services() {
+        let mut simulation = Simulation::new(100, 0, map_size());
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(0, 0),
+        );
+        let unknown = ServiceId::new(99);
+
+        assert_eq!(
+            simulation.apply(GameCommand::ConnectServices {
+                from: unknown,
+                to: server,
+            }),
+            Err(CommandError::InvalidNetwork(NetworkError::UnknownService(
+                unknown
+            )))
+        );
+        assert_eq!(
+            simulation.apply(GameCommand::ConnectServices {
+                from: server,
+                to: unknown,
+            }),
+            Err(CommandError::InvalidNetwork(NetworkError::UnknownService(
+                unknown
+            )))
+        );
+        assert_eq!(
+            simulation.apply(GameCommand::ConnectServices {
+                from: server,
+                to: server,
+            }),
+            Err(CommandError::InvalidNetwork(NetworkError::SelfConnection(
+                server
+            )))
+        );
+    }
+
+    #[test]
+    fn unaffordable_connections_leave_the_simulation_unchanged() {
+        let mut simulation = Simulation::new(150, 0, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+        let before = simulation.clone();
+
+        assert_eq!(
+            simulation.apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            }),
+            Err(CommandError::InsufficientBudget(BudgetError {
+                required: NETWORK_LINK_COST,
+                available: 0,
+            }))
+        );
+        assert_eq!(simulation, before);
+    }
+
+    #[test]
+    fn traffic_traversal_handles_multi_hop_paths_and_cycles() {
+        let mut simulation = Simulation::new(280, 250, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let first_server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+        let second_server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(2, 0),
+        );
+        for (from, to) in [
+            (gateway, first_server),
+            (first_server, second_server),
+            (second_server, gateway),
+        ] {
+            simulation
+                .apply(GameCommand::ConnectServices { from, to })
+                .expect("test links are affordable and valid");
+        }
+        let mut report = simulation.advance();
+        for _ in 1..ServiceKind::ApplicationServer.construction_ticks() {
+            report = simulation.advance();
+        }
+
+        assert_eq!(report.served, 200);
+        assert_eq!(report.dropped, 50);
     }
 
     #[test]

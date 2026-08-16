@@ -22,11 +22,19 @@ impl ContentCatalog {
     #[must_use]
     pub fn builtin() -> Self {
         Self {
-            services: vec![ServiceDefinition {
-                kind: ServiceKind::ApplicationServer,
-                display_name: "Application Server".to_owned(),
-                description: "Runs application code and handles incoming requests.".to_owned(),
-            }],
+            services: vec![
+                ServiceDefinition {
+                    kind: ServiceKind::InternetGateway,
+                    display_name: "Internet Gateway".to_owned(),
+                    description: "Provides an entry point for incoming internet traffic."
+                        .to_owned(),
+                },
+                ServiceDefinition {
+                    kind: ServiceKind::ApplicationServer,
+                    display_name: "Application Server".to_owned(),
+                    description: "Runs application code and handles incoming requests.".to_owned(),
+                },
+            ],
         }
     }
 

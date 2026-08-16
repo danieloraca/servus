@@ -4,6 +4,8 @@ use servus_sim::{GridPosition, Service, ServiceKind, ServiceState, Simulation, T
 
 const APPLICATION_SERVER_BUILDING: char = 'a';
 const APPLICATION_SERVER_OPERATIONAL: char = 'A';
+const INTERNET_GATEWAY_BUILDING: char = 'g';
+const INTERNET_GATEWAY_OPERATIONAL: char = 'G';
 const EMPTY_TILE: char = '.';
 const INVALID_OCCUPANT: char = '?';
 
@@ -48,7 +50,8 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
     write_border(&mut output, row_label_width, size.width());
 
     output
-        .push_str("Legend: a=Application Server (building), A=Application Server (operational)\n");
+        .push_str("Legend: g/G=Internet Gateway, a/A=Application Server (building/operational)\n");
+    write_network_links(&mut output, simulation);
     if let Some(report) = report {
         writeln!(
             output,
@@ -66,6 +69,10 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
 
 fn service_symbol(service: &Service) -> char {
     match (service.kind(), service.state()) {
+        (ServiceKind::InternetGateway, ServiceState::UnderConstruction { .. }) => {
+            INTERNET_GATEWAY_BUILDING
+        }
+        (ServiceKind::InternetGateway, ServiceState::Operational) => INTERNET_GATEWAY_OPERATIONAL,
         (ServiceKind::ApplicationServer, ServiceState::UnderConstruction { .. }) => {
             APPLICATION_SERVER_BUILDING
         }
@@ -73,6 +80,23 @@ fn service_symbol(service: &Service) -> char {
             APPLICATION_SERVER_OPERATIONAL
         }
     }
+}
+
+fn write_network_links(output: &mut String, simulation: &Simulation) {
+    output.push_str("Links: ");
+    if simulation.network().links().is_empty() {
+        output.push_str("none\n");
+        return;
+    }
+
+    for (index, link) in simulation.network().links().iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        write!(output, "{} -> {}", link.from.value(), link.to.value())
+            .expect("writing to a String cannot fail");
+    }
+    output.push('\n');
 }
 
 fn digit(value: u16) -> char {
@@ -129,7 +153,8 @@ mod tests {
                 "0 |...|\n",
                 "1 |...|\n",
                 "  +---+\n",
-                "Legend: a=Application Server (building), A=Application Server (operational)\n",
+                "Legend: g/G=Internet Gateway, a/A=Application Server (building/operational)\n",
+                "Links: none\n",
                 "Traffic: awaiting first tick\n",
             )
         );
@@ -161,5 +186,42 @@ mod tests {
     fn coordinate_headers_repeat_decimal_digits_for_wide_maps() {
         let simulation = simulation(12, 1, 0);
         assert!(render_simulation(&simulation, None).contains("   012345678901\n"));
+    }
+
+    #[test]
+    fn gateways_and_directed_links_are_rendered() {
+        let mut simulation = simulation(3, 2, 170);
+        let gateway = simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::InternetGateway,
+                position: GridPosition::new(0, 0),
+            })
+            .expect("test gateway is affordable and valid");
+        let server = simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::ApplicationServer,
+                position: GridPosition::new(2, 0),
+            })
+            .expect("test server is affordable and valid");
+        let servus_sim::CommandOutcome::ServiceBuilt { id: gateway, .. } = gateway else {
+            panic!("a build command must produce a service");
+        };
+        let servus_sim::CommandOutcome::ServiceBuilt { id: server, .. } = server else {
+            panic!("a build command must produce a service");
+        };
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            })
+            .expect("test link is affordable and valid");
+
+        let building = render_simulation(&simulation, None);
+        assert!(building.contains("0 |g.a|"));
+        assert!(building.contains("Links: 1 -> 2"));
+
+        simulation.advance();
+        let gateway_operational = render_simulation(&simulation, None);
+        assert!(gateway_operational.contains("0 |G.a|"));
     }
 }

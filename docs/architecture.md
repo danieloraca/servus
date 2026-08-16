@@ -31,3 +31,13 @@ can trigger visuals and notifications without reconstructing state changes.
 The current terminal renderer lives in `servus-game` and reads only the simulation's public API.
 It has no influence on simulation state, so it can later be replaced or accompanied by a graphical
 engine client without changing game rules.
+
+## Network topology
+
+Network links are directed edges between existing services. Links can be configured while either
+endpoint is under construction, but traffic traverses only operational services. Every tick begins
+at all operational Internet Gateways and walks reachable links; only reachable operational
+services contribute request capacity. Cycles are supported and visited at most once per tick.
+
+Link validation and payment occur atomically. Unknown endpoints, self-connections, duplicates, and
+unaffordable links leave the complete simulation state unchanged.
