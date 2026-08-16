@@ -83,6 +83,7 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
 fn service_symbol(service: &Service) -> char {
     match (service.kind(), service.state()) {
         (_, ServiceState::Disrupted { .. }) => '!',
+        (_, ServiceState::Upgrading { .. }) => '^',
         (ServiceKind::InternetGateway, ServiceState::UnderConstruction { .. }) => {
             INTERNET_GATEWAY_BUILDING
         }
@@ -335,5 +336,27 @@ mod tests {
         assert!(view.contains("0 |G!.|"));
         assert!(view.contains("Cyberattack: service 2 disrupted for 2 ticks"));
         assert!(view.contains("outage_penalty=25 | failover=false"));
+    }
+
+    #[test]
+    fn upgrading_service_has_a_distinct_symbol() {
+        let mut simulation = simulation(3, 2, 300);
+        let built = simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::ApplicationServer,
+                position: GridPosition::new(1, 0),
+            })
+            .expect("test server is affordable");
+        let servus_sim::CommandOutcome::ServiceBuilt { id, .. } = built else {
+            panic!("a build command must produce a service");
+        };
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
+        simulation
+            .apply(GameCommand::UpgradeService { id })
+            .expect("scaled upgrade is affordable");
+
+        assert!(render_simulation(&simulation, None).contains("0 |.^.|"));
     }
 }

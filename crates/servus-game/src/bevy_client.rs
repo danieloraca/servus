@@ -5,7 +5,8 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResolution};
 use servus_sim::{
     CYBER_ATTACK_INTERVAL, CommandError, CommandOutcome, GameCommand, GridPosition, MapSize,
-    NETWORK_LINK_COST, Service, ServiceId, ServiceKind, ServiceState, Simulation, TickReport,
+    NETWORK_LINK_COST, Service, ServiceId, ServiceKind, ServiceState, ServiceTier, Simulation,
+    TickReport,
 };
 
 #[cfg(test)]
@@ -23,7 +24,7 @@ const DEMAND_STEP: u64 = 50;
 const MAX_DEMAND: u64 = 1_000;
 const SERVED_OBJECTIVE: u64 = 500;
 const NOTIFICATION_SECONDS: f32 = 3.0;
-const OBJECTIVE_COUNT: usize = 8;
+const OBJECTIVE_COUNT: usize = 9;
 
 #[derive(Resource)]
 struct ClientSimulation {
@@ -75,6 +76,13 @@ enum ConnectionAction {
     SourceSelected(ServiceId),
     Connected { from: ServiceId, to: ServiceId },
     Disconnected { from: ServiceId, to: ServiceId },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UpgradeAction {
+    from: ServiceTier,
+    to: ServiceTier,
+    cost: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,6 +200,7 @@ pub fn run_bevy_client() {
                 select_building,
                 toggle_network_mode,
                 adjust_demand,
+                upgrade_inspected_service,
                 move_camera,
                 advance_simulation,
                 update_service_visuals,
@@ -226,14 +235,14 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
 
     commands.spawn((
         Text::new("Loading controls…"),
-        TextFont::from_font_size(13.0),
+        TextFont::from_font_size(12.0),
         TextColor(Color::srgb(0.84, 0.9, 0.96)),
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(22.0),
             top: Val::Px(22.0),
             padding: UiRect::all(Val::Px(10.0)),
-            width: Val::Px(310.0),
+            width: Val::Px(330.0),
             ..default()
         },
         BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.94)),
@@ -241,14 +250,12 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new(
-            "WASD: move   1–4: build   C: connect   X: disconnect   -/+: demand   R: restart",
-        ),
-        TextFont::from_font_size(17.0),
+        Text::new("WASD: move   1–4: build   C: connect   X: disconnect   U: upgrade   R: restart"),
+        TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(335.0),
+            left: Val::Px(360.0),
             bottom: Val::Px(24.0),
             ..default()
         },
@@ -406,6 +413,36 @@ fn adjust_demand(
     let demand = adjusted_demand(current, increase);
     client.simulation.set_requests_per_tick(demand);
     tool.feedback = format!("Incoming demand set to {demand} requests/tick");
+}
+
+fn upgrade_inspected_service(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut client: ResMut<ClientSimulation>,
+    mut tool: ResMut<BuildTool>,
+) {
+    if !keys.just_pressed(KeyCode::KeyU) {
+        return;
+    }
+    let Some(id) = tool.inspected else {
+        tool.feedback = "Right-click a service before upgrading it".to_owned();
+        return;
+    };
+
+    match try_upgrade_service(&mut client.simulation, id) {
+        Ok(upgrade) => {
+            client.capital_invested = client.capital_invested.saturating_add(upgrade.cost);
+            tool.network_mode = None;
+            tool.connection_from = None;
+            tool.feedback = format!(
+                "Upgrading {} from {} to {} ({} credits)",
+                service_description(&client.simulation, id),
+                upgrade.from,
+                upgrade.to,
+                upgrade.cost
+            );
+        }
+        Err(error) => tool.feedback = format!("Cannot upgrade: {error}"),
+    }
 }
 
 fn move_camera(
@@ -646,6 +683,17 @@ fn draw_map(
         );
     }
 
+    for service in simulation.services() {
+        let center = grid_to_world(map_size, service.position());
+        for ring in 0..tier_ring_count(service.tier()) {
+            gizmos.circle_2d(
+                center,
+                SERVICE_SIZE * 0.58 + ring as f32 * 5.0,
+                Color::srgb(0.35, 0.92, 1.0),
+            );
+        }
+    }
+
     for link in simulation.network().links() {
         let (Some(from), Some(to)) = (simulation.service(link.from), simulation.service(link.to))
         else {
@@ -853,6 +901,9 @@ fn build_service(
         CommandOutcome::ServicesDisconnected { .. } => {
             unreachable!("a build command cannot produce a disconnection outcome")
         }
+        CommandOutcome::ServiceUpgradeStarted { .. } => {
+            unreachable!("a build command cannot produce an upgrade outcome")
+        }
     }
 }
 
@@ -897,6 +948,9 @@ fn try_connection_click(
             *connection_from = None;
             Ok(ConnectionAction::Disconnected { from, to })
         }
+        CommandOutcome::ServiceUpgradeStarted { .. } => {
+            unreachable!("a network command cannot produce an upgrade outcome")
+        }
     }
 }
 
@@ -912,6 +966,33 @@ fn can_disconnect(simulation: &Simulation, from: ServiceId, to: ServiceId) -> bo
     preview
         .apply(GameCommand::DisconnectServices { from, to })
         .is_ok()
+}
+
+fn try_upgrade_service(
+    simulation: &mut Simulation,
+    id: ServiceId,
+) -> Result<UpgradeAction, CommandError> {
+    let outcome = simulation.apply(GameCommand::UpgradeService { id })?;
+    match outcome {
+        CommandOutcome::ServiceUpgradeStarted { from, to, .. } => {
+            let kind = simulation
+                .service(id)
+                .expect("a successful upgrade keeps the service")
+                .kind();
+            Ok(UpgradeAction {
+                from,
+                to,
+                cost: kind
+                    .upgrade_cost(to)
+                    .expect("a successful upgrade target has a cost"),
+            })
+        }
+        CommandOutcome::ServiceBuilt { .. }
+        | CommandOutcome::ServicesConnected { .. }
+        | CommandOutcome::ServicesDisconnected { .. } => {
+            unreachable!("an upgrade command must produce an upgrade outcome")
+        }
+    }
 }
 
 fn service_description(simulation: &Simulation, id: ServiceId) -> String {
@@ -955,19 +1036,36 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
                     )
                 })
         });
-    let capacity = service.kind().traffic_capacity().map_or_else(
-        || "unbounded".to_owned(),
-        |capacity| format!("{capacity} req/tick"),
-    );
+    let capacity = service.kind().traffic_capacity_at(service.tier());
+    let upgrade = match service.state() {
+        ServiceState::Upgrading { target, .. } => format!("In progress: {target}"),
+        _ => service.next_tier().map_or_else(
+            || "Maximum tier".to_owned(),
+            |target| {
+                format!(
+                    "{}: {}c / {} ticks / cap {}",
+                    target,
+                    service.next_upgrade_cost().expect("a next tier has a cost"),
+                    service
+                        .kind()
+                        .upgrade_ticks(target)
+                        .expect("a next tier has a duration"),
+                    service.kind().traffic_capacity_at(target),
+                )
+            },
+        ),
+    };
     Some(format!(
-        "INSPECT\n{} #{}\nTile          ({}, {})\nState         {}\nCapacity      {}\nRun cost      {}/tick\nLinks in/out  {}/{}\nFlow in/out   {}/{}",
+        "INSPECT\n{} #{}\nTier          {}\nTile          ({}, {})\nState         {}\nCapacity      {} req/tick\nRun cost      {}/tick\nUpgrade       {}\nLinks in/out  {}/{}\nFlow in/out   {}/{}",
         service_kind_name(service.kind()),
         id.value(),
+        service.tier(),
         position.x,
         position.y,
         service.state(),
         capacity,
-        service.kind().operating_cost(),
+        service.kind().operating_cost_at(service.tier()),
+        upgrade,
         incoming_links,
         outgoing_links,
         incoming_traffic,
@@ -1016,6 +1114,14 @@ fn objective_statuses(client: &ClientSimulation) -> [ObjectiveStatus; OBJECTIVE_
             label: "Reach positive infrastructure ROI",
             complete: client.capital_invested > 0
                 && client.operating_profit >= i128::from(client.capital_invested),
+        },
+        ObjectiveStatus {
+            label: "Upgrade infrastructure to Scaled",
+            complete: client
+                .simulation
+                .services()
+                .iter()
+                .any(|service| service.tier() != ServiceTier::Starter),
         },
     ]
 }
@@ -1191,6 +1297,10 @@ fn color_for_state(style: VisualStyle, state: ServiceState, elapsed: f32) -> Col
             let alpha = 0.42 + elapsed.sin().abs() * 0.25;
             Color::srgba(red * 0.65, green * 0.65, blue * 0.65, alpha)
         }
+        ServiceState::Upgrading { .. } => {
+            let pulse = 0.65 + elapsed.sin().abs() * 0.35;
+            Color::srgb(0.25, 0.7 * pulse, 1.0 * pulse)
+        }
         ServiceState::Disrupted { .. } => {
             let pulse = 0.55 + elapsed.sin().abs() * 0.45;
             Color::srgb(0.95 * pulse, 0.08, 0.1)
@@ -1202,7 +1312,16 @@ fn scale_for_state(state: ServiceState, elapsed: f32) -> f32 {
     match state {
         ServiceState::Operational => 1.0,
         ServiceState::UnderConstruction { .. } => 0.94 + elapsed.sin().abs() * 0.06,
+        ServiceState::Upgrading { .. } => 0.92 + elapsed.sin().abs() * 0.1,
         ServiceState::Disrupted { .. } => 0.9 + elapsed.sin().abs() * 0.1,
+    }
+}
+
+const fn tier_ring_count(tier: ServiceTier) -> usize {
+    match tier {
+        ServiceTier::Starter => 0,
+        ServiceTier::Scaled => 1,
+        ServiceTier::Enterprise => 2,
     }
 }
 
@@ -1261,7 +1380,7 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     let objectives = objectives_text(client);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\nX  Disconnect tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -1398,6 +1517,17 @@ mod tests {
         );
         assert_eq!(scale_for_state(ServiceState::Operational, 0.0), 1.0);
         assert_eq!(scale_for_state(ServiceState::Operational, 5.0), 1.0);
+        let upgrading = ServiceState::Upgrading {
+            target: ServiceTier::Scaled,
+            ticks_remaining: 2,
+        };
+        assert_ne!(
+            scale_for_state(upgrading, 0.0),
+            scale_for_state(upgrading, 1.0)
+        );
+        assert_eq!(tier_ring_count(ServiceTier::Starter), 0);
+        assert_eq!(tier_ring_count(ServiceTier::Scaled), 1);
+        assert_eq!(tier_ring_count(ServiceTier::Enterprise), 2);
         let disrupted = ServiceState::Disrupted { ticks_remaining: 2 };
         assert_ne!(
             scale_for_state(disrupted, 0.0),
@@ -1449,6 +1579,41 @@ mod tests {
             ServiceKind::InternetGateway,
             GridPosition::new(0, 0)
         ));
+    }
+
+    #[test]
+    fn upgrade_tool_starts_the_next_tier_and_reports_its_capital_cost() {
+        let map = MapSize::new(2, 2).expect("test map is valid");
+        let mut simulation = Simulation::new(300, 0, map);
+        let server = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(0, 0),
+        )
+        .expect("server placement is valid");
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
+        let credits_before = simulation.budget().credits();
+
+        assert_eq!(
+            try_upgrade_service(&mut simulation, server.id()),
+            Ok(UpgradeAction {
+                from: ServiceTier::Starter,
+                to: ServiceTier::Scaled,
+                cost: 80,
+            })
+        );
+        assert_eq!(simulation.budget().credits(), credits_before - 80);
+        assert_eq!(
+            simulation
+                .service(server.id())
+                .map(|service| service.state()),
+            Some(ServiceState::Upgrading {
+                target: ServiceTier::Scaled,
+                ticks_remaining: 2,
+            })
+        );
     }
 
     #[test]
@@ -1691,6 +1856,7 @@ mod tests {
         assert!(!objectives[5].complete);
         assert!(!objectives[6].complete);
         assert!(!objectives[7].complete);
+        assert!(!objectives[8].complete);
 
         while client.simulation.tick().number() < CYBER_ATTACK_INTERVAL {
             let report = client.simulation.advance();
@@ -1704,11 +1870,13 @@ mod tests {
             }
             client.last_report = Some(report);
         }
+        let before_upgrade = objective_statuses(&client);
         assert!(
-            objective_statuses(&client)
+            before_upgrade[..8]
                 .iter()
                 .all(|objective| objective.complete)
         );
+        assert!(!before_upgrade[8].complete);
         assert!(objectives_text(&client).contains("[x] Serve 500 total requests"));
         let mut progress = GameProgress::new();
         let notification = take_attack_notification(&client, &mut progress)
@@ -1716,6 +1884,24 @@ mod tests {
         assert!(notification.contains("CYBERATTACK BLOCKED"));
         assert!(notification.contains("Application Server #4 protected"));
         assert_eq!(take_attack_notification(&client, &mut progress), None);
+
+        let upgrade = try_upgrade_service(&mut client.simulation, server.id())
+            .expect("the objective upgrade is affordable");
+        client.capital_invested += upgrade.cost;
+        for _ in 0..2 {
+            let report = client.simulation.advance();
+            client.total_served += report.served;
+            client.total_revenue += report.revenue;
+            client.operating_costs += report.operating_cost;
+            client.operating_cost_shortfall += report.operating_cost_shortfall;
+            client.operating_profit += report.net_income;
+            client.last_report = Some(report);
+        }
+        assert!(
+            objective_statuses(&client)
+                .iter()
+                .all(|objective| objective.complete)
+        );
     }
 
     #[test]
@@ -1752,12 +1938,18 @@ mod tests {
             },
             ObjectiveStatus {
                 label: "eight",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "nine",
                 complete: false,
             },
         ];
         assert_eq!(
             apply_objective_progress(&mut progress, partial),
-            ProgressEvent::Completed(vec!["one", "two", "three", "four", "five", "six", "seven"])
+            ProgressEvent::Completed(vec![
+                "one", "two", "three", "four", "five", "six", "seven", "eight"
+            ])
         );
         assert_eq!(
             apply_objective_progress(&mut progress, partial),
@@ -2051,9 +2243,11 @@ mod tests {
 
         let text = inspection_text(&client, inspected).expect("the inspected service exists");
         assert!(text.contains("Application Server #3"));
+        assert!(text.contains("Tier          Starter"));
         assert!(text.contains("State         operational"));
         assert!(text.contains("Capacity      100 req/tick"));
         assert!(text.contains("Run cost      8/tick"));
+        assert!(text.contains("Upgrade       Scaled: 80c / 2 ticks / cap 225"));
         assert!(text.contains("Links in/out  1/0"));
         assert!(text.contains("Flow in/out   100/0"));
     }

@@ -1,7 +1,7 @@
 use crate::{
     Budget, CommandError, CommandOutcome, GameCommand, GridMap, MapSize, NETWORK_LINK_COST,
     Network, NetworkError, OUTAGE_PENALTY_PER_DROPPED_REQUEST, Service, ServiceId, ServiceState,
-    Tick, TickReport, Traffic,
+    Tick, TickReport, Traffic, UpgradeError,
 };
 
 const REVENUE_PER_SERVED_REQUEST: u64 = 1;
@@ -127,6 +127,44 @@ impl Simulation {
 
                 Ok(CommandOutcome::ServicesDisconnected { from, to })
             }
+            GameCommand::UpgradeService { id } => {
+                let service = self
+                    .service(id)
+                    .copied()
+                    .ok_or(CommandError::InvalidUpgrade(UpgradeError::UnknownService(
+                        id,
+                    )))?;
+                if !service.is_operational() {
+                    return Err(CommandError::InvalidUpgrade(UpgradeError::NotOperational {
+                        id,
+                        state: service.state(),
+                    }));
+                }
+                let from = service.tier();
+                let to = service.next_tier().ok_or(CommandError::InvalidUpgrade(
+                    UpgradeError::MaximumTier { id, tier: from },
+                ))?;
+                let cost = service
+                    .kind()
+                    .upgrade_cost(to)
+                    .expect("every higher tier has an upgrade cost");
+                let ticks = service
+                    .kind()
+                    .upgrade_ticks(to)
+                    .expect("every higher tier has an upgrade duration");
+                self.budget
+                    .spend(cost)
+                    .map_err(CommandError::InsufficientBudget)?;
+                let service = self
+                    .services
+                    .iter_mut()
+                    .find(|service| service.id() == id)
+                    .expect("the validated upgrade service still exists");
+                let started = service.start_upgrade(to, ticks);
+                debug_assert!(started, "a validated upgrade must start");
+
+                Ok(CommandOutcome::ServiceUpgradeStarted { id, from, to })
+            }
         }
     }
 
@@ -215,6 +253,9 @@ mod tests {
                 panic!("a build command must produce a service")
             }
             CommandOutcome::ServicesDisconnected { .. } => {
+                panic!("a build command must produce a service")
+            }
+            CommandOutcome::ServiceUpgradeStarted { .. } => {
                 panic!("a build command must produce a service")
             }
         }
@@ -486,6 +527,123 @@ mod tests {
             }))
         );
         assert_eq!(simulation, before_failed_command);
+    }
+
+    #[test]
+    fn upgrades_trade_temporary_downtime_for_higher_capacity() {
+        let mut simulation = Simulation::new(400, 200, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            })
+            .expect("test connection is valid");
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
+        assert_eq!(simulation.advance().served, 100);
+
+        let credits_before = simulation.budget().credits();
+        assert_eq!(
+            simulation.apply(GameCommand::UpgradeService { id: server }),
+            Ok(CommandOutcome::ServiceUpgradeStarted {
+                id: server,
+                from: crate::ServiceTier::Starter,
+                to: crate::ServiceTier::Scaled,
+            })
+        );
+        assert_eq!(simulation.budget().credits(), credits_before - 80);
+        assert_eq!(
+            simulation.service(server).map(|service| service.tier()),
+            Some(crate::ServiceTier::Starter)
+        );
+        let before_duplicate_upgrade = simulation.clone();
+        assert!(matches!(
+            simulation.apply(GameCommand::UpgradeService { id: server }),
+            Err(CommandError::InvalidUpgrade(
+                UpgradeError::NotOperational { .. }
+            ))
+        ));
+        assert_eq!(simulation, before_duplicate_upgrade);
+        let upgrading = simulation.advance();
+        assert_eq!(upgrading.served, 0);
+        assert_eq!(upgrading.operating_cost, 10);
+        let scaled = simulation.advance();
+        assert_eq!(scaled.served, 200);
+        assert_eq!(scaled.operating_cost, 15);
+        assert_eq!(
+            simulation.service(server).map(|service| service.tier()),
+            Some(crate::ServiceTier::Scaled)
+        );
+
+        simulation
+            .apply(GameCommand::UpgradeService { id: server })
+            .expect("the enterprise upgrade is affordable");
+        for _ in 0..3 {
+            simulation.advance();
+        }
+        assert_eq!(
+            simulation.service(server).map(|service| service.tier()),
+            Some(crate::ServiceTier::Enterprise)
+        );
+        let before_maximum_upgrade = simulation.clone();
+        assert_eq!(
+            simulation.apply(GameCommand::UpgradeService { id: server }),
+            Err(CommandError::InvalidUpgrade(UpgradeError::MaximumTier {
+                id: server,
+                tier: crate::ServiceTier::Enterprise,
+            }))
+        );
+        assert_eq!(simulation, before_maximum_upgrade);
+    }
+
+    #[test]
+    fn invalid_upgrades_are_atomic() {
+        let mut simulation = Simulation::new(150, 0, map_size());
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(0, 0),
+        );
+        let before_building_upgrade = simulation.clone();
+        assert!(matches!(
+            simulation.apply(GameCommand::UpgradeService { id: server }),
+            Err(CommandError::InvalidUpgrade(
+                UpgradeError::NotOperational { .. }
+            ))
+        ));
+        assert_eq!(simulation, before_building_upgrade);
+
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
+        let before_unaffordable_upgrade = simulation.clone();
+        assert_eq!(
+            simulation.apply(GameCommand::UpgradeService { id: server }),
+            Err(CommandError::InsufficientBudget(BudgetError {
+                required: 80,
+                available: 42,
+            }))
+        );
+        assert_eq!(simulation, before_unaffordable_upgrade);
+
+        let unknown = ServiceId::new(999);
+        assert_eq!(
+            simulation.apply(GameCommand::UpgradeService { id: unknown }),
+            Err(CommandError::InvalidUpgrade(UpgradeError::UnknownService(
+                unknown
+            )))
+        );
     }
 
     #[test]

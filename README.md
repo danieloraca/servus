@@ -16,6 +16,18 @@ Operational infrastructure also charges a recurring cost each tick: 2 credits fo
 5 for a Firewall, 4 for a Load Balancer, and 8 for an Application Server. The client tracks
 revenue, operating profit, capital invested, unpaid costs, and infrastructure ROI; exhausting the
 budget while costs are due makes the solution insolvent.
+Every service begins at the Starter tier and can be upgraded through Scaled to Enterprise. Upgrades
+consume capital and take the service offline while work completes, but buy increasingly efficient
+capacity in the same map tile. This creates a tradeoff: upgraded infrastructure is cheaper and more
+space-efficient at scale, while multiple Starter instances provide safer redundancy.
+
+| Service | Starter capacity / opex | Scaled capacity / opex / upgrade | Enterprise capacity / opex / upgrade |
+| --- | ---: | ---: | ---: |
+| Gateway | 250 / 2 | 600 / 3 / 40 | 1,500 / 5 / 80 |
+| Firewall | 200 / 5 | 450 / 8 / 90 | 1,000 / 13 / 180 |
+| Load Balancer | 150 / 4 | 350 / 6 / 60 | 800 / 10 / 120 |
+| Application Server | 100 / 8 | 225 / 13 / 80 | 500 / 22 / 160 |
+
 The Bevy client starts a playable empty-map scenario and renders infrastructure states, directed
 connections, live simulation metrics, and objectives in a native window. A separate deterministic
 three-tick ASCII scenario remains available for headless debugging.
@@ -42,6 +54,7 @@ In the graphical client:
 - press X, then click its source and destination to remove a directed connection without a refund;
 - press Escape to cancel connection mode;
 - right-click a service to inspect its state, capacity, links, and current traffic;
+- press U to upgrade the inspected service; cyan rings show Scaled and Enterprise tiers;
 - compare revenue, operating costs, capital investment, and ROI in the economics panel;
 - watch yellow request markers follow the exact traffic routed through each link;
 - use - and + to decrease or increase incoming demand by 50 requests per tick;

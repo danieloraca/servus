@@ -12,9 +12,9 @@ mod simulation;
 mod traffic;
 
 pub use clock::Tick;
-pub use command::{CommandError, CommandOutcome, GameCommand};
+pub use command::{CommandError, CommandOutcome, GameCommand, UpgradeError};
 pub use economy::{Budget, BudgetError, OUTAGE_PENALTY_PER_DROPPED_REQUEST};
-pub use infrastructure::{Service, ServiceId, ServiceKind, ServiceState};
+pub use infrastructure::{Service, ServiceId, ServiceKind, ServiceState, ServiceTier};
 pub use map::{Footprint, GridMap, GridPosition, MapSize, MapSizeError, PlacementError};
 pub use network::{NETWORK_LINK_COST, Network, NetworkError, NetworkLink};
 pub use security::{CYBER_ATTACK_INTERVAL, DISRUPTION_TICKS};
