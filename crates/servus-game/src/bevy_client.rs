@@ -84,6 +84,9 @@ struct SolutionLabel;
 #[derive(Component)]
 struct SolutionFloorVisual(ServiceId);
 
+#[derive(Component)]
+struct ServiceVisualLabel(ServiceId);
+
 type MapVisualFilter = Or<(With<ServiceVisual>, With<SolutionVisual>)>;
 
 #[derive(Component)]
@@ -115,6 +118,12 @@ struct BuildServiceButton(ServiceKind);
 
 #[derive(Component)]
 struct BuildFoundationButton;
+
+#[derive(Component)]
+struct UpgradeButton;
+
+#[derive(Component)]
+struct UpgradeButtonLabel;
 
 #[derive(Resource)]
 struct BuildTool {
@@ -280,6 +289,8 @@ pub fn run_bevy_client() {
                 update_audio_controls,
                 adjust_demand,
                 upgrade_inspected_service,
+                handle_upgrade_button,
+                update_upgrade_button,
                 move_camera,
                 advance_simulation,
                 update_service_visuals,
@@ -414,6 +425,29 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
         InspectionText,
     ));
 
+    commands
+        .spawn((
+            Button,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(18.0),
+                bottom: Val::Px(18.0),
+                width: Val::Px(280.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.1, 0.23, 0.34)),
+            BuildMenuButton,
+            UpgradeButton,
+        ))
+        .with_child((
+            Text::new("UPGRADE — select a floor"),
+            TextFont::from_font_size(13.0),
+            TextColor(Color::WHITE),
+            UpgradeButtonLabel,
+        ));
+
     spawn_build_menu(&mut commands);
 }
 
@@ -529,10 +563,11 @@ fn spawn_service_visual(commands: &mut Commands, map_size: MapSize, service: Ser
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text2d::new(style.abbreviation),
+                Text2d::new(service_visual_label(&service)),
                 TextFont::from_font_size(16.0),
                 TextColor(Color::WHITE),
                 Transform::from_xyz(0.0, 0.0, 2.0),
+                ServiceVisualLabel(service.id()),
             ));
         });
 }
@@ -579,10 +614,11 @@ fn spawn_solution_visual(
                     ))
                     .with_children(|floor_parent| {
                         floor_parent.spawn((
-                            Text2d::new(style.abbreviation),
+                            Text2d::new(service_visual_label(service)),
                             TextFont::from_font_size(10.0),
                             TextColor(Color::WHITE),
                             Transform::from_xyz(0.0, 0.0, 0.1),
+                            ServiceVisualLabel(service.id()),
                         ));
                     });
             }
@@ -916,6 +952,27 @@ fn upgrade_inspected_service(
     if !keys.just_pressed(KeyCode::KeyU) {
         return;
     }
+    perform_inspected_upgrade(&mut client, &mut tool, &mut sounds);
+}
+
+fn handle_upgrade_button(
+    interactions: Query<&Interaction, (Changed<Interaction>, With<UpgradeButton>)>,
+    mut client: ResMut<ClientSimulation>,
+    mut tool: ResMut<BuildTool>,
+    mut sounds: ResMut<SoundQueue>,
+) {
+    for interaction in &interactions {
+        if *interaction == Interaction::Pressed {
+            perform_inspected_upgrade(&mut client, &mut tool, &mut sounds);
+        }
+    }
+}
+
+fn perform_inspected_upgrade(
+    client: &mut ClientSimulation,
+    tool: &mut BuildTool,
+    sounds: &mut SoundQueue,
+) {
     let Some(id) = tool.inspected else {
         tool.feedback = "Right-click a service before upgrading it".to_owned();
         sounds.push(SoundEffect::Error);
@@ -940,6 +997,52 @@ fn upgrade_inspected_service(
             tool.feedback = format!("Cannot upgrade: {error}");
             sounds.push(SoundEffect::Error);
         }
+    }
+}
+
+fn update_upgrade_button(
+    client: Res<ClientSimulation>,
+    tool: Res<BuildTool>,
+    interaction: Single<&Interaction, With<UpgradeButton>>,
+    mut background: Single<&mut BackgroundColor, With<UpgradeButton>>,
+    mut label: Single<&mut Text, With<UpgradeButtonLabel>>,
+) {
+    let actionable = tool.inspected.is_some_and(|id| {
+        client.simulation.service(id).is_some_and(|service| {
+            service.is_operational()
+                && service.next_tier().is_some()
+                && service
+                    .next_upgrade_cost()
+                    .is_some_and(|cost| client.simulation.budget().credits() >= cost)
+        })
+    });
+    background.0 = if actionable {
+        menu_button_color(true, **interaction)
+    } else {
+        Color::srgb(0.1, 0.14, 0.18)
+    };
+    **label = Text::new(upgrade_button_text(&client.simulation, tool.inspected));
+}
+
+fn upgrade_button_text(simulation: &Simulation, inspected: Option<ServiceId>) -> String {
+    let Some(service) = inspected.and_then(|id| simulation.service(id)) else {
+        return "UPGRADE — right-click a floor".to_owned();
+    };
+    match service.state() {
+        ServiceState::Upgrading {
+            target,
+            ticks_remaining,
+        } => format!("UPGRADING TO {target}  •  {ticks_remaining} ticks"),
+        ServiceState::Operational => service.next_tier().map_or_else(
+            || "MAXIMUM TIER REACHED".to_owned(),
+            |target| {
+                format!(
+                    "UPGRADE TO {target}  •  {} credits",
+                    service.next_upgrade_cost().expect("a next tier has a cost")
+                )
+            },
+        ),
+        _ => "UPGRADE — service must be operational".to_owned(),
     }
 }
 
@@ -1266,7 +1369,11 @@ fn update_service_visuals(
     time: Res<Time>,
     client: Res<ClientSimulation>,
     mut visuals: Query<(&ServiceVisual, &mut Sprite, &mut Transform)>,
-    mut floor_visuals: Query<(&SolutionFloorVisual, &mut Sprite), Without<ServiceVisual>>,
+    mut floor_visuals: Query<
+        (&SolutionFloorVisual, &mut Sprite, &mut Transform),
+        Without<ServiceVisual>,
+    >,
+    mut labels: Query<(&ServiceVisualLabel, &mut Text2d)>,
 ) {
     let elapsed = time.elapsed_secs();
     for (visual, mut sprite, mut transform) in &mut visuals {
@@ -1278,11 +1385,17 @@ fn update_service_visuals(
         let scale = scale_for_state(service.state(), elapsed);
         transform.scale = Vec3::splat(scale);
     }
-    for (visual, mut sprite) in &mut floor_visuals {
+    for (visual, mut sprite, mut transform) in &mut floor_visuals {
         let Some(service) = client.simulation.service(visual.0) else {
             continue;
         };
         sprite.color = color_for_state(visual_style(service.kind()), service.state(), elapsed);
+        transform.scale = Vec3::splat(scale_for_state(service.state(), elapsed));
+    }
+    for (visual, mut label) in &mut labels {
+        if let Some(service) = client.simulation.service(visual.0) {
+            **label = service_visual_label(service);
+        }
     }
 }
 
@@ -1372,6 +1485,16 @@ fn draw_map(
     for service in simulation.services() {
         let center = service_city_position(simulation, map_size, service);
         let size = service_city_visual_size(simulation, service);
+        if tool.inspected == Some(service.id()) {
+            gizmos.rect_2d(center, size + Vec2::splat(7.0), Color::srgb(0.3, 0.92, 1.0));
+        }
+        if service_utilization_percent(&client, service.id()) >= 80 {
+            gizmos.rect_2d(
+                center,
+                size + Vec2::splat(13.0),
+                Color::srgb(1.0, 0.65, 0.12),
+            );
+        }
         for ring in 0..tier_ring_count(service.tier()) {
             gizmos.rect_2d(
                 center,
@@ -1995,19 +2118,11 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
         .iter()
         .filter(|link| link.from == id)
         .count();
-    let (incoming_traffic, outgoing_traffic) =
-        client.last_report.as_ref().map_or((0, 0), |report| {
-            report
-                .link_traffic
-                .iter()
-                .fold((0_u64, 0_u64), |totals, traffic| {
-                    (
-                        totals.0 + u64::from(traffic.to == id) * traffic.requests,
-                        totals.1 + u64::from(traffic.from == id) * traffic.requests,
-                    )
-                })
-        });
+    let (incoming_traffic, outgoing_traffic) = service_flow(client, id);
     let capacity = service.kind().traffic_capacity_at(service.tier());
+    let load = incoming_traffic.max(outgoing_traffic);
+    let utilization = utilization_percent(load, capacity);
+    let recommendation = upgrade_recommendation(service, utilization);
     let upgrade = match service.state() {
         ServiceState::Upgrading { target, .. } => format!("In progress: {target}"),
         _ => service.next_tier().map_or_else(
@@ -2027,13 +2142,16 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
         ),
     };
     Some(format!(
-        "INSPECT\n{} #{}\nTier          {}\n{}\nState         {}\nCapacity      {} req/tick\nRun cost      {}/tick\nUpgrade       {}\nLinks in/out  {}/{}\nFlow in/out   {}/{}",
+        "INSPECT\n{} #{}\nTier          {}\n{}\nState         {}\nLoad          {} / {} ({}%)\nAssessment    {}\nRun cost      {}/tick\nUpgrade       {}\nLinks in/out  {}/{}\nFlow in/out   {}/{}",
         service_kind_name(service.kind()),
         id.value(),
         service.tier(),
         location,
         service.state(),
+        load,
         capacity,
+        utilization,
+        recommendation,
         service.kind().operating_cost_at(service.tier()),
         upgrade,
         incoming_links,
@@ -2041,6 +2159,51 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
         incoming_traffic,
         outgoing_traffic,
     ))
+}
+
+fn service_flow(client: &ClientSimulation, id: ServiceId) -> (u64, u64) {
+    client.last_report.as_ref().map_or((0, 0), |report| {
+        report
+            .link_traffic
+            .iter()
+            .fold((0_u64, 0_u64), |totals, traffic| {
+                (
+                    totals.0 + u64::from(traffic.to == id) * traffic.requests,
+                    totals.1 + u64::from(traffic.from == id) * traffic.requests,
+                )
+            })
+    })
+}
+
+fn service_utilization_percent(client: &ClientSimulation, id: ServiceId) -> u64 {
+    let Some(service) = client.simulation.service(id) else {
+        return 0;
+    };
+    let (incoming, outgoing) = service_flow(client, id);
+    utilization_percent(
+        incoming.max(outgoing),
+        service.kind().traffic_capacity_at(service.tier()),
+    )
+}
+
+fn utilization_percent(load: u64, capacity: u64) -> u64 {
+    if capacity == 0 {
+        0
+    } else {
+        load.saturating_mul(100).div_ceil(capacity).min(100)
+    }
+}
+
+fn upgrade_recommendation(service: &Service, utilization: u64) -> &'static str {
+    match service.state() {
+        ServiceState::Upgrading { .. } => "Upgrade in progress",
+        ServiceState::UnderConstruction { .. } => "Wait for construction",
+        ServiceState::Disrupted { .. } => "Restore service first",
+        ServiceState::Operational if service.next_tier().is_none() => "Maximum tier",
+        ServiceState::Operational if utilization >= 80 => "BOTTLENECK — upgrade recommended",
+        ServiceState::Operational if utilization >= 60 => "Busy — watch demand",
+        ServiceState::Operational => "Healthy — no upgrade needed",
+    }
 }
 
 fn solution_inspection_text(client: &ClientSimulation, id: SolutionId) -> Option<String> {
@@ -2338,6 +2501,25 @@ fn service_kind_name(kind: ServiceKind) -> &'static str {
         ServiceKind::MessageQueue => "Message Queue",
         ServiceKind::PubSubTopic => "Pub/Sub Topic",
         ServiceKind::EventBus => "Event Bus",
+    }
+}
+
+fn service_visual_label(service: &Service) -> String {
+    let abbreviation = visual_style(service.kind()).abbreviation;
+    match service.state() {
+        ServiceState::UnderConstruction { ticks_remaining } => {
+            format!("{abbreviation} · BUILD {ticks_remaining}")
+        }
+        ServiceState::Upgrading {
+            target,
+            ticks_remaining,
+        } => format!("↑ {} · {ticks_remaining}t", target.short_label()),
+        ServiceState::Operational => {
+            format!("{abbreviation} {}", service.tier().short_label())
+        }
+        ServiceState::Disrupted { ticks_remaining } => {
+            format!("{abbreviation} · DOWN {ticks_remaining}")
+        }
     }
 }
 
@@ -2879,6 +3061,36 @@ mod tests {
             Some(ServiceKind::ApplicationServer)
         );
         assert_eq!(guided_successor(ServiceKind::ApplicationServer), None);
+    }
+
+    #[test]
+    fn upgrade_guidance_identifies_load_and_exposes_progress() {
+        assert_eq!(utilization_percent(79, 100), 79);
+        assert_eq!(utilization_percent(80, 100), 80);
+        assert_eq!(utilization_percent(150, 100), 100);
+
+        let mut simulation = Simulation::new(
+            500,
+            0,
+            MapSize::new(2, 2).expect("test map dimensions are valid"),
+        );
+        let service = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(0, 0),
+        )
+        .expect("test service is affordable");
+        let id = service.id();
+        assert!(service_visual_label(&service).contains("BUILD"));
+        for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
+            simulation.advance();
+        }
+        assert!(upgrade_button_text(&simulation, Some(id)).contains("UPGRADE TO Scaled"));
+
+        try_upgrade_service(&mut simulation, id).expect("operational service can upgrade");
+        let upgrading = simulation.service(id).expect("service still exists");
+        assert!(service_visual_label(upgrading).starts_with("↑ II"));
+        assert!(upgrade_button_text(&simulation, Some(id)).contains("UPGRADING TO Scaled"));
     }
 
     #[test]
@@ -3677,7 +3889,8 @@ mod tests {
         assert!(text.contains("Application Server #3"));
         assert!(text.contains("Tier          Starter"));
         assert!(text.contains("State         operational"));
-        assert!(text.contains("Capacity      100 req/tick"));
+        assert!(text.contains("Load          100 / 100 (100%)"));
+        assert!(text.contains("Assessment    BOTTLENECK — upgrade recommended"));
         assert!(text.contains("Run cost      8/tick"));
         assert!(text.contains("Upgrade       Scaled: 80c / 2 ticks / cap 225"));
         assert!(text.contains("Links in/out  1/0"));
