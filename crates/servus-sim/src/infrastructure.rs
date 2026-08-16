@@ -40,6 +40,40 @@ pub struct ServiceProfile {
     pub construction_ticks: u16,
     pub footprint: Footprint,
     pub role: ServiceRole,
+    pub category: InfrastructureCategory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InfrastructureCategory {
+    Network,
+    Security,
+    Compute,
+    Data,
+    Messaging,
+    Operations,
+}
+
+impl InfrastructureCategory {
+    pub const ALL: [Self; 6] = [
+        Self::Network,
+        Self::Security,
+        Self::Compute,
+        Self::Data,
+        Self::Messaging,
+        Self::Operations,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Network => "Network",
+            Self::Security => "Security",
+            Self::Compute => "Compute",
+            Self::Data => "Data",
+            Self::Messaging => "Messaging",
+            Self::Operations => "Operations",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -121,6 +155,7 @@ impl ServiceKind {
             construction_ticks: 1,
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Ingress,
+            category: InfrastructureCategory::Network,
         },
         ServiceProfile {
             build_cost: 125,
@@ -131,6 +166,7 @@ impl ServiceKind {
             construction_ticks: 2,
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Transit,
+            category: InfrastructureCategory::Security,
         },
         ServiceProfile {
             build_cost: 75,
@@ -141,6 +177,7 @@ impl ServiceKind {
             construction_ticks: 2,
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Transit,
+            category: InfrastructureCategory::Network,
         },
         ServiceProfile {
             build_cost: 100,
@@ -151,6 +188,7 @@ impl ServiceKind {
             construction_ticks: 3,
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Application,
+            category: InfrastructureCategory::Compute,
         },
         ServiceProfile {
             build_cost: 180,
@@ -161,6 +199,7 @@ impl ServiceKind {
             construction_ticks: 4,
             footprint: Footprint::new(2, 2),
             role: ServiceRole::PersistentStore,
+            category: InfrastructureCategory::Data,
         },
         ServiceProfile {
             build_cost: 120,
@@ -171,6 +210,7 @@ impl ServiceKind {
             construction_ticks: 3,
             footprint: Footprint::new(1, 1),
             role: ServiceRole::PersistentStore,
+            category: InfrastructureCategory::Data,
         },
         ServiceProfile {
             build_cost: 70,
@@ -181,6 +221,7 @@ impl ServiceKind {
             construction_ticks: 2,
             footprint: Footprint::new(1, 1),
             role: ServiceRole::Cache,
+            category: InfrastructureCategory::Data,
         },
     ];
 
@@ -237,6 +278,11 @@ impl ServiceKind {
     #[must_use]
     pub const fn is_cache(self) -> bool {
         matches!(self.profile().role, ServiceRole::Cache)
+    }
+
+    #[must_use]
+    pub const fn category(self) -> InfrastructureCategory {
+        self.profile().category
     }
 
     #[must_use]
@@ -566,6 +612,31 @@ mod tests {
             ServiceKind::ALL
                 .iter()
                 .all(|kind| kind.profile().construction_ticks > 0)
+        );
+    }
+
+    #[test]
+    fn infrastructure_catalog_assigns_every_service_to_a_category() {
+        assert_eq!(
+            ServiceKind::InternetGateway.category(),
+            InfrastructureCategory::Network
+        );
+        assert_eq!(
+            ServiceKind::Firewall.category(),
+            InfrastructureCategory::Security
+        );
+        assert_eq!(
+            ServiceKind::ApplicationServer.category(),
+            InfrastructureCategory::Compute
+        );
+        assert!(
+            [
+                ServiceKind::RelationalDatabase,
+                ServiceKind::KeyValueStore,
+                ServiceKind::Cache,
+            ]
+            .into_iter()
+            .all(|kind| kind.category() == InfrastructureCategory::Data)
         );
     }
 

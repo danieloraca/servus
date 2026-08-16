@@ -16,7 +16,8 @@ pub use clock::Tick;
 pub use command::{CommandError, CommandOutcome, GameCommand, UpgradeError};
 pub use economy::{Budget, BudgetError, OUTAGE_PENALTY_PER_DROPPED_REQUEST};
 pub use infrastructure::{
-    Service, ServiceId, ServiceKind, ServiceProfile, ServiceRole, ServiceState, ServiceTier,
+    InfrastructureCategory, Service, ServiceId, ServiceKind, ServiceProfile, ServiceRole,
+    ServiceState, ServiceTier,
 };
 pub use map::{
     Footprint, GridMap, GridPosition, MapOccupant, MapSize, MapSizeError, PlacementError,
