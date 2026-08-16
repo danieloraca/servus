@@ -6,6 +6,8 @@ const APPLICATION_SERVER_BUILDING: char = 'a';
 const APPLICATION_SERVER_OPERATIONAL: char = 'A';
 const INTERNET_GATEWAY_BUILDING: char = 'g';
 const INTERNET_GATEWAY_OPERATIONAL: char = 'G';
+const FIREWALL_BUILDING: char = 'f';
+const FIREWALL_OPERATIONAL: char = 'F';
 const LOAD_BALANCER_BUILDING: char = 'l';
 const LOAD_BALANCER_OPERATIONAL: char = 'L';
 const EMPTY_TILE: char = '.';
@@ -52,7 +54,7 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
     write_border(&mut output, row_label_width, size.width());
 
     output.push_str(
-        "Legend: g/G=Gateway, l/L=Load Balancer, a/A=App Server (building/operational)\n",
+        "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, !=disrupted\n",
     );
     write_network_links(&mut output, simulation);
     if let Some(report) = report {
@@ -63,6 +65,7 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
         )
         .expect("writing to a String cannot fail");
         write_completed_services(&mut output, report);
+        write_cyberattack(&mut output, report);
     } else {
         output.push_str("Traffic: awaiting first tick\n");
     }
@@ -72,10 +75,13 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
 
 fn service_symbol(service: &Service) -> char {
     match (service.kind(), service.state()) {
+        (_, ServiceState::Disrupted { .. }) => '!',
         (ServiceKind::InternetGateway, ServiceState::UnderConstruction { .. }) => {
             INTERNET_GATEWAY_BUILDING
         }
         (ServiceKind::InternetGateway, ServiceState::Operational) => INTERNET_GATEWAY_OPERATIONAL,
+        (ServiceKind::Firewall, ServiceState::UnderConstruction { .. }) => FIREWALL_BUILDING,
+        (ServiceKind::Firewall, ServiceState::Operational) => FIREWALL_OPERATIONAL,
         (ServiceKind::LoadBalancer, ServiceState::UnderConstruction { .. }) => {
             LOAD_BALANCER_BUILDING
         }
@@ -86,6 +92,28 @@ fn service_symbol(service: &Service) -> char {
         (ServiceKind::ApplicationServer, ServiceState::Operational) => {
             APPLICATION_SERVER_OPERATIONAL
         }
+    }
+}
+
+fn write_cyberattack(output: &mut String, report: &TickReport) {
+    let Some(attack) = report.cyberattack else {
+        return;
+    };
+    if attack.blocked {
+        writeln!(
+            output,
+            "Cyberattack: blocked before service {}",
+            attack.target.value()
+        )
+        .expect("writing to a String cannot fail");
+    } else {
+        writeln!(
+            output,
+            "Cyberattack: service {} disrupted for {} ticks",
+            attack.target.value(),
+            attack.disruption_ticks
+        )
+        .expect("writing to a String cannot fail");
     }
 }
 
@@ -160,7 +188,7 @@ mod tests {
                 "0 |...|\n",
                 "1 |...|\n",
                 "  +---+\n",
-                "Legend: g/G=Gateway, l/L=Load Balancer, a/A=App Server (building/operational)\n",
+                "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, !=disrupted\n",
                 "Links: none\n",
                 "Traffic: awaiting first tick\n",
             )
@@ -212,6 +240,22 @@ mod tests {
     }
 
     #[test]
+    fn firewall_symbol_changes_when_construction_completes() {
+        let mut simulation = simulation(3, 2, 125);
+        simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::Firewall,
+                position: GridPosition::new(1, 0),
+            })
+            .expect("test firewall is affordable and valid");
+
+        assert!(render_simulation(&simulation, None).contains("0 |.f.|"));
+        simulation.advance();
+        simulation.advance();
+        assert!(render_simulation(&simulation, None).contains("0 |.F.|"));
+    }
+
+    #[test]
     fn gateways_and_directed_links_are_rendered() {
         let mut simulation = simulation(3, 2, 170);
         let gateway = simulation
@@ -246,5 +290,42 @@ mod tests {
         simulation.advance();
         let gateway_operational = render_simulation(&simulation, None);
         assert!(gateway_operational.contains("0 |G.a|"));
+    }
+
+    #[test]
+    fn disrupted_service_and_cyberattack_are_rendered() {
+        let mut simulation = simulation(3, 2, 300);
+        let gateway = simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::InternetGateway,
+                position: GridPosition::new(0, 0),
+            })
+            .expect("test gateway is affordable");
+        let server = simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::ApplicationServer,
+                position: GridPosition::new(1, 0),
+            })
+            .expect("test server is affordable");
+        let servus_sim::CommandOutcome::ServiceBuilt { id: gateway, .. } = gateway else {
+            panic!("a build command must produce a service");
+        };
+        let servus_sim::CommandOutcome::ServiceBuilt { id: server, .. } = server else {
+            panic!("a build command must produce a service");
+        };
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            })
+            .expect("test link is affordable");
+
+        let mut report = simulation.advance();
+        while report.tick.number() < servus_sim::CYBER_ATTACK_INTERVAL {
+            report = simulation.advance();
+        }
+        let view = render_simulation(&simulation, Some(&report));
+        assert!(view.contains("0 |G!.|"));
+        assert!(view.contains("Cyberattack: service 2 disrupted for 2 ticks"));
     }
 }

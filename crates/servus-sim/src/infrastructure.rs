@@ -20,13 +20,15 @@ impl ServiceId {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ServiceKind {
     InternetGateway,
+    Firewall,
     LoadBalancer,
     ApplicationServer,
 }
 
 impl ServiceKind {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::InternetGateway,
+        Self::Firewall,
         Self::LoadBalancer,
         Self::ApplicationServer,
     ];
@@ -35,6 +37,7 @@ impl ServiceKind {
     pub const fn build_cost(self) -> u64 {
         match self {
             Self::InternetGateway => 50,
+            Self::Firewall => 125,
             Self::LoadBalancer => 75,
             Self::ApplicationServer => 100,
         }
@@ -44,6 +47,7 @@ impl ServiceKind {
     pub const fn traffic_capacity(self) -> Option<u64> {
         match self {
             Self::InternetGateway => None,
+            Self::Firewall => Some(200),
             Self::LoadBalancer => Some(150),
             Self::ApplicationServer => Some(100),
         }
@@ -58,6 +62,7 @@ impl ServiceKind {
     pub const fn construction_ticks(self) -> u16 {
         match self {
             Self::InternetGateway => 1,
+            Self::Firewall => 2,
             Self::LoadBalancer => 2,
             Self::ApplicationServer => 3,
         }
@@ -67,6 +72,7 @@ impl ServiceKind {
     pub const fn footprint(self) -> Footprint {
         match self {
             Self::InternetGateway => Footprint::new(1, 1),
+            Self::Firewall => Footprint::new(1, 1),
             Self::LoadBalancer => Footprint::new(1, 1),
             Self::ApplicationServer => Footprint::new(1, 1),
         }
@@ -77,6 +83,7 @@ impl ServiceKind {
 pub enum ServiceState {
     UnderConstruction { ticks_remaining: u16 },
     Operational,
+    Disrupted { ticks_remaining: u16 },
 }
 
 impl fmt::Display for ServiceState {
@@ -89,6 +96,9 @@ impl fmt::Display for ServiceState {
                 )
             }
             Self::Operational => formatter.write_str("operational"),
+            Self::Disrupted { ticks_remaining } => {
+                write!(formatter, "disrupted ({ticks_remaining} ticks remaining)")
+            }
         }
     }
 }
@@ -147,7 +157,7 @@ impl Service {
     #[must_use]
     pub const fn traffic_capacity(self, unbounded_capacity: u64) -> u64 {
         match self.state {
-            ServiceState::UnderConstruction { .. } => 0,
+            ServiceState::UnderConstruction { .. } | ServiceState::Disrupted { .. } => 0,
             ServiceState::Operational => match self.kind.traffic_capacity() {
                 Some(capacity) if capacity < unbounded_capacity => capacity,
                 Some(_) => unbounded_capacity,
@@ -169,7 +179,27 @@ impl Service {
                 false
             }
             ServiceState::Operational => false,
+            ServiceState::Disrupted { ticks_remaining: 1 } => {
+                self.state = ServiceState::Operational;
+                false
+            }
+            ServiceState::Disrupted { ticks_remaining } => {
+                self.state = ServiceState::Disrupted {
+                    ticks_remaining: ticks_remaining - 1,
+                };
+                false
+            }
         }
+    }
+
+    pub(crate) fn disrupt(&mut self, ticks: u16) -> bool {
+        if ticks == 0 || !self.is_operational() {
+            return false;
+        }
+        self.state = ServiceState::Disrupted {
+            ticks_remaining: ticks,
+        };
+        true
     }
 }
 
@@ -207,6 +237,15 @@ mod tests {
     }
 
     #[test]
+    fn firewall_has_a_cost_construction_time_and_throughput_limit() {
+        let kind = ServiceKind::Firewall;
+        assert_eq!(kind.build_cost(), 125);
+        assert_eq!(kind.traffic_capacity(), Some(200));
+        assert!(!kind.serves_requests());
+        assert_eq!(kind.construction_ticks(), 2);
+    }
+
+    #[test]
     fn a_service_exposes_its_identity_kind_and_capacity() {
         let position = GridPosition::new(3, 4);
         let service = Service::new(ServiceId::new(7), ServiceKind::ApplicationServer, position);
@@ -226,6 +265,7 @@ mod tests {
             ServiceKind::ALL,
             [
                 ServiceKind::InternetGateway,
+                ServiceKind::Firewall,
                 ServiceKind::LoadBalancer,
                 ServiceKind::ApplicationServer
             ]
@@ -267,5 +307,30 @@ mod tests {
             "under construction (2 ticks remaining)"
         );
         assert_eq!(ServiceState::Operational.to_string(), "operational");
+        assert_eq!(
+            ServiceState::Disrupted { ticks_remaining: 2 }.to_string(),
+            "disrupted (2 ticks remaining)"
+        );
+    }
+
+    #[test]
+    fn disruption_removes_capacity_then_recovers_automatically() {
+        let mut service = Service::new(
+            ServiceId::new(8),
+            ServiceKind::InternetGateway,
+            GridPosition::new(0, 0),
+        );
+        service.advance_construction();
+        assert!(service.disrupt(2));
+        assert!(!service.is_operational());
+        assert_eq!(service.traffic_capacity(100), 0);
+        assert!(!service.advance_construction());
+        assert_eq!(
+            service.state(),
+            ServiceState::Disrupted { ticks_remaining: 1 }
+        );
+        assert!(!service.advance_construction());
+        assert_eq!(service.state(), ServiceState::Operational);
+        assert!(!service.disrupt(0));
     }
 }

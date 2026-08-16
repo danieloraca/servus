@@ -7,6 +7,7 @@ mod infrastructure;
 mod map;
 mod network;
 mod routing;
+mod security;
 mod simulation;
 mod traffic;
 
@@ -16,5 +17,6 @@ pub use economy::{Budget, BudgetError};
 pub use infrastructure::{Service, ServiceId, ServiceKind, ServiceState};
 pub use map::{Footprint, GridMap, GridPosition, MapSize, MapSizeError, PlacementError};
 pub use network::{NETWORK_LINK_COST, Network, NetworkError, NetworkLink};
+pub use security::{CYBER_ATTACK_INTERVAL, DISRUPTION_TICKS};
 pub use simulation::Simulation;
-pub use traffic::{LinkTraffic, TickReport, Traffic};
+pub use traffic::{CyberAttackReport, LinkTraffic, TickReport, Traffic};

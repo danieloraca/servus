@@ -127,6 +127,9 @@ impl Simulation {
             })
             .collect();
 
+        let cyberattack =
+            crate::security::resolve_scheduled_attack(self.tick, &mut self.services, &self.network);
+
         let received = self.traffic.requests_per_tick();
         let routing = crate::routing::route_requests(received, &self.services, &self.network);
         let served = routing.served;
@@ -142,6 +145,7 @@ impl Simulation {
             revenue,
             completed_services,
             link_traffic: routing.link_traffic,
+            cyberattack,
         }
     }
 }
@@ -502,6 +506,91 @@ mod tests {
                     requests: 50,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn scheduled_attack_disrupts_an_unprotected_server_then_it_recovers() {
+        let mut simulation = Simulation::new(300, 100, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(1, 0),
+        );
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: gateway,
+                to: server,
+            })
+            .expect("test link is affordable");
+
+        let mut report = simulation.advance();
+        while report.tick.number() < crate::CYBER_ATTACK_INTERVAL - 1 {
+            report = simulation.advance();
+        }
+        assert_eq!(report.served, 100);
+        assert_eq!(report.cyberattack, None);
+
+        let attacked = simulation.advance();
+        assert_eq!(
+            attacked.cyberattack,
+            Some(crate::CyberAttackReport {
+                target: server,
+                blocked: false,
+                disruption_ticks: crate::DISRUPTION_TICKS,
+            })
+        );
+        assert_eq!(attacked.served, 0);
+        assert_eq!(simulation.advance().served, 0);
+        let recovered = simulation.advance();
+        assert_eq!(recovered.served, 100);
+        assert_eq!(
+            simulation.service(server).map(|service| service.state()),
+            Some(ServiceState::Operational)
+        );
+    }
+
+    #[test]
+    fn firewall_on_the_ingress_path_blocks_the_scheduled_attack() {
+        let mut simulation = Simulation::new(500, 100, map_size());
+        let gateway = build(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            position(0, 0),
+        );
+        let firewall = build(&mut simulation, ServiceKind::Firewall, position(1, 0));
+        let server = build(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            position(2, 0),
+        );
+        for (from, to) in [(gateway, firewall), (firewall, server)] {
+            simulation
+                .apply(GameCommand::ConnectServices { from, to })
+                .expect("test links are affordable");
+        }
+
+        let mut report = simulation.advance();
+        while report.tick.number() < crate::CYBER_ATTACK_INTERVAL {
+            report = simulation.advance();
+        }
+        assert_eq!(
+            report.cyberattack,
+            Some(crate::CyberAttackReport {
+                target: server,
+                blocked: true,
+                disruption_ticks: 0,
+            })
+        );
+        assert_eq!(report.served, 100);
+        assert_eq!(
+            simulation.service(server).map(|service| service.state()),
+            Some(ServiceState::Operational)
         );
     }
 

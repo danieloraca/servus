@@ -32,7 +32,7 @@ cargo run -p servus-game --bin servus-ascii
 
 In the graphical client:
 
-- select a Gateway, Load Balancer, or Application Server with 1, 2, or 3;
+- select a Gateway, Load Balancer, Application Server, or Firewall with 1, 2, 3, or 4;
 - click a highlighted free map tile to build;
 - press C, then click a source service and destination service to create a directed connection;
 - press Escape to cancel connection mode;
@@ -42,3 +42,7 @@ In the graphical client:
 - move the camera with WASD or the arrow keys and zoom with the mouse wheel;
 - press Space to pause or resume simulation ticks;
 - complete all objectives to reach victory, or press R to restart the scenario.
+
+Cyberattacks arrive every eight ticks. An exposed application server is disrupted for two ticks.
+A firewall blocks the attack only when every directed path from an Internet Gateway to the target
+passes through an operational firewall; bypass connections remain vulnerable.

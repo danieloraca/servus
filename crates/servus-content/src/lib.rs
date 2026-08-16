@@ -30,6 +30,12 @@ impl ContentCatalog {
                         .to_owned(),
                 },
                 ServiceDefinition {
+                    kind: ServiceKind::Firewall,
+                    display_name: "Firewall".to_owned(),
+                    description: "Blocks attacks when every ingress path passes through it."
+                        .to_owned(),
+                },
+                ServiceDefinition {
                     kind: ServiceKind::LoadBalancer,
                     display_name: "Load Balancer".to_owned(),
                     description: "Distributes incoming traffic across downstream services."

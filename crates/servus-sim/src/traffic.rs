@@ -7,6 +7,13 @@ pub struct LinkTraffic {
     pub requests: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CyberAttackReport {
+    pub target: ServiceId,
+    pub blocked: bool,
+    pub disruption_ticks: u16,
+}
+
 /// Incoming demand for a solution during every simulation tick.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Traffic {
@@ -39,6 +46,7 @@ pub struct TickReport {
     pub revenue: u64,
     pub completed_services: Vec<ServiceId>,
     pub link_traffic: Vec<LinkTraffic>,
+    pub cyberattack: Option<CyberAttackReport>,
 }
 
 #[cfg(test)]

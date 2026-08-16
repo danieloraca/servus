@@ -4,8 +4,8 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResolution};
 use servus_sim::{
-    CommandError, CommandOutcome, GameCommand, GridPosition, MapSize, Service, ServiceId,
-    ServiceKind, ServiceState, Simulation, TickReport,
+    CYBER_ATTACK_INTERVAL, CommandError, CommandOutcome, GameCommand, GridPosition, MapSize,
+    Service, ServiceId, ServiceKind, ServiceState, Simulation, TickReport,
 };
 
 #[cfg(test)]
@@ -23,6 +23,7 @@ const DEMAND_STEP: u64 = 50;
 const MAX_DEMAND: u64 = 1_000;
 const SERVED_OBJECTIVE: u64 = 500;
 const NOTIFICATION_SECONDS: f32 = 3.0;
+const OBJECTIVE_COUNT: usize = 7;
 
 #[derive(Resource)]
 struct ClientSimulation {
@@ -31,6 +32,7 @@ struct ClientSimulation {
     tick_timer: Timer,
     paused: bool,
     total_served: u64,
+    blocked_attacks: u64,
 }
 
 #[derive(Component)]
@@ -107,8 +109,9 @@ enum ProgressEvent {
 
 #[derive(Resource)]
 struct GameProgress {
-    completed: [bool; 5],
+    completed: [bool; OBJECTIVE_COUNT],
     won: bool,
+    last_announced_attack_tick: Option<u64>,
     notification: Option<String>,
     notification_timer: Timer,
 }
@@ -116,8 +119,9 @@ struct GameProgress {
 impl GameProgress {
     fn new() -> Self {
         Self {
-            completed: [false; 5],
+            completed: [false; OBJECTIVE_COUNT],
             won: false,
+            last_announced_attack_tick: None,
             notification: None,
             notification_timer: Timer::from_seconds(NOTIFICATION_SECONDS, TimerMode::Once),
         }
@@ -135,6 +139,7 @@ pub fn run_bevy_client() {
             tick_timer: Timer::from_seconds(TICK_SECONDS, TimerMode::Repeating),
             paused: false,
             total_served: 0,
+            blocked_attacks: 0,
         })
         .insert_resource(BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -142,7 +147,7 @@ pub fn run_bevy_client() {
             connecting: false,
             connection_from: None,
             inspected: None,
-            feedback: "Select with 1–3, then click a free tile".to_owned(),
+            feedback: "Select with 1–4, then click a free tile".to_owned(),
         })
         .insert_resource(GameProgress::new())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -196,14 +201,14 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
 
     commands.spawn((
         Text::new("Loading controls…"),
-        TextFont::from_font_size(16.0),
+        TextFont::from_font_size(14.0),
         TextColor(Color::srgb(0.84, 0.9, 0.96)),
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(22.0),
             top: Val::Px(22.0),
-            padding: UiRect::all(Val::Px(18.0)),
-            width: Val::Px(300.0),
+            padding: UiRect::all(Val::Px(14.0)),
+            width: Val::Px(310.0),
             ..default()
         },
         BackgroundColor(Color::srgba(0.04, 0.075, 0.12, 0.94)),
@@ -211,7 +216,7 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD: move   Wheel: zoom   1–3: build   C: connect   -/+: demand   R: restart"),
+        Text::new("WASD: move   1–4: build   C: connect   -/+: demand   R: restart"),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -301,6 +306,8 @@ fn select_building(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>)
         Some(ServiceKind::LoadBalancer)
     } else if keys.just_pressed(KeyCode::Digit3) || keys.just_pressed(KeyCode::Numpad3) {
         Some(ServiceKind::ApplicationServer)
+    } else if keys.just_pressed(KeyCode::Digit4) || keys.just_pressed(KeyCode::Numpad4) {
+        Some(ServiceKind::Firewall)
     } else {
         None
     };
@@ -460,6 +467,9 @@ fn advance_simulation(time: Res<Time>, mut client: ResMut<ClientSimulation>) {
     if client.tick_timer.just_finished() {
         let report = client.simulation.advance();
         client.total_served = client.total_served.saturating_add(report.served);
+        if report.cyberattack.is_some_and(|attack| attack.blocked) {
+            client.blocked_attacks = client.blocked_attacks.saturating_add(1);
+        }
         client.last_report = Some(report);
     }
 }
@@ -718,6 +728,10 @@ fn adjusted_demand(current: u64, increase: bool) -> u64 {
     }
 }
 
+fn ticks_until_attack(tick: u64) -> u64 {
+    CYBER_ATTACK_INTERVAL - tick % CYBER_ATTACK_INTERVAL
+}
+
 fn build_service(
     simulation: &mut Simulation,
     kind: ServiceKind,
@@ -836,7 +850,7 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
     ))
 }
 
-fn objective_statuses(client: &ClientSimulation) -> [ObjectiveStatus; 5] {
+fn objective_statuses(client: &ClientSimulation) -> [ObjectiveStatus; OBJECTIVE_COUNT] {
     let has_kind = |kind| {
         client
             .simulation
@@ -850,6 +864,10 @@ fn objective_statuses(client: &ClientSimulation) -> [ObjectiveStatus; 5] {
             complete: has_kind(ServiceKind::InternetGateway),
         },
         ObjectiveStatus {
+            label: "Build a Firewall",
+            complete: has_kind(ServiceKind::Firewall),
+        },
+        ObjectiveStatus {
             label: "Build a Load Balancer",
             complete: has_kind(ServiceKind::LoadBalancer),
         },
@@ -860,6 +878,10 @@ fn objective_statuses(client: &ClientSimulation) -> [ObjectiveStatus; 5] {
         ObjectiveStatus {
             label: "Route a live request",
             complete: client.total_served > 0,
+        },
+        ObjectiveStatus {
+            label: "Block a cyberattack",
+            complete: client.blocked_attacks > 0,
         },
         ObjectiveStatus {
             label: "Serve 500 total requests",
@@ -878,7 +900,7 @@ fn objectives_text(client: &ClientSimulation) -> String {
 
 fn apply_objective_progress(
     progress: &mut GameProgress,
-    statuses: [ObjectiveStatus; 5],
+    statuses: [ObjectiveStatus; OBJECTIVE_COUNT],
 ) -> ProgressEvent {
     let newly_completed = statuses
         .iter()
@@ -906,18 +928,46 @@ fn update_objective_progress(
     mut progress: ResMut<GameProgress>,
 ) {
     let event = apply_objective_progress(&mut progress, objective_statuses(&client));
-    match event {
-        ProgressEvent::None => {}
-        ProgressEvent::Completed(labels) => {
-            progress.notification = Some(format!("Objective complete: {}", labels.join(", ")));
-            progress.notification_timer.reset();
-        }
+    let attack_notification = take_attack_notification(&client, &mut progress);
+    let notification = match event {
+        ProgressEvent::None => attack_notification,
+        ProgressEvent::Completed(labels) => Some(attack_notification.map_or_else(
+            || format!("Objective complete: {}", labels.join(", ")),
+            |attack| format!("{attack} — objective complete!"),
+        )),
         ProgressEvent::Victory => {
             client.paused = true;
-            progress.notification = Some("VICTORY — resilient solution online!".to_owned());
-            progress.notification_timer.reset();
+            Some("VICTORY — resilient solution online!".to_owned())
         }
+    };
+    if let Some(notification) = notification {
+        progress.notification = Some(notification);
+        progress.notification_timer.reset();
     }
+}
+
+fn take_attack_notification(
+    client: &ClientSimulation,
+    progress: &mut GameProgress,
+) -> Option<String> {
+    let report = client.last_report.as_ref()?;
+    let attack = report.cyberattack?;
+    if progress.last_announced_attack_tick == Some(report.tick.number()) {
+        return None;
+    }
+    progress.last_announced_attack_tick = Some(report.tick.number());
+    Some(if attack.blocked {
+        format!(
+            "CYBERATTACK BLOCKED — {} protected",
+            service_description(&client.simulation, attack.target)
+        )
+    } else {
+        format!(
+            "BREACH — {} disrupted for {} ticks",
+            service_description(&client.simulation, attack.target),
+            attack.disruption_ticks
+        )
+    })
 }
 
 fn update_notification(
@@ -948,13 +998,14 @@ fn reset_scenario(
     client.tick_timer = Timer::from_seconds(TICK_SECONDS, TimerMode::Repeating);
     client.paused = false;
     client.total_served = 0;
+    client.blocked_attacks = 0;
 
     tool.selected = ServiceKind::ApplicationServer;
     tool.hovered = None;
     tool.connecting = false;
     tool.connection_from = None;
     tool.inspected = None;
-    tool.feedback = "Scenario restarted; select with 1–3".to_owned();
+    tool.feedback = "Scenario restarted; select with 1–4".to_owned();
 
     *progress = GameProgress::new();
     progress.notification = Some("Scenario restarted".to_owned());
@@ -965,6 +1016,10 @@ fn visual_style(kind: ServiceKind) -> VisualStyle {
         ServiceKind::InternetGateway => VisualStyle {
             abbreviation: "GW",
             color: [0.15, 0.72, 0.92],
+        },
+        ServiceKind::Firewall => VisualStyle {
+            abbreviation: "FW",
+            color: [0.94, 0.55, 0.16],
         },
         ServiceKind::LoadBalancer => VisualStyle {
             abbreviation: "LB",
@@ -980,6 +1035,7 @@ fn visual_style(kind: ServiceKind) -> VisualStyle {
 fn service_kind_name(kind: ServiceKind) -> &'static str {
     match kind {
         ServiceKind::InternetGateway => "Internet Gateway",
+        ServiceKind::Firewall => "Firewall",
         ServiceKind::LoadBalancer => "Load Balancer",
         ServiceKind::ApplicationServer => "Application Server",
     }
@@ -993,6 +1049,10 @@ fn color_for_state(style: VisualStyle, state: ServiceState, elapsed: f32) -> Col
             let alpha = 0.42 + elapsed.sin().abs() * 0.25;
             Color::srgba(red * 0.65, green * 0.65, blue * 0.65, alpha)
         }
+        ServiceState::Disrupted { .. } => {
+            let pulse = 0.55 + elapsed.sin().abs() * 0.45;
+            Color::srgb(0.95 * pulse, 0.08, 0.1)
+        }
     }
 }
 
@@ -1000,6 +1060,7 @@ fn scale_for_state(state: ServiceState, elapsed: f32) -> f32 {
     match state {
         ServiceState::Operational => 1.0,
         ServiceState::UnderConstruction { .. } => 0.94 + elapsed.sin().abs() * 0.06,
+        ServiceState::Disrupted { .. } => 0.9 + elapsed.sin().abs() * 0.1,
     }
 }
 
@@ -1027,13 +1088,15 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     let objectives = objectives_text(client);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
         served,
         dropped,
         client.total_served,
+        client.blocked_attacks,
+        ticks_until_attack(simulation.tick().number()),
         tool.feedback,
     )
 }
@@ -1111,6 +1174,9 @@ mod tests {
         assert_eq!(adjusted_demand(0, false), 0);
         assert_eq!(adjusted_demand(MAX_DEMAND, true), MAX_DEMAND);
         assert_eq!(adjusted_demand(MAX_DEMAND - 20, true), MAX_DEMAND);
+        assert_eq!(ticks_until_attack(0), CYBER_ATTACK_INTERVAL);
+        assert_eq!(ticks_until_attack(7), 1);
+        assert_eq!(ticks_until_attack(8), CYBER_ATTACK_INTERVAL);
     }
 
     #[test]
@@ -1135,12 +1201,16 @@ mod tests {
     #[test]
     fn every_service_kind_has_a_distinct_visual_identity() {
         let gateway = visual_style(ServiceKind::InternetGateway);
+        let firewall = visual_style(ServiceKind::Firewall);
         let load_balancer = visual_style(ServiceKind::LoadBalancer);
         let server = visual_style(ServiceKind::ApplicationServer);
         assert_eq!(gateway.abbreviation, "GW");
+        assert_eq!(firewall.abbreviation, "FW");
         assert_eq!(load_balancer.abbreviation, "LB");
         assert_eq!(server.abbreviation, "APP");
         assert_ne!(gateway.color, load_balancer.color);
+        assert_ne!(gateway.color, firewall.color);
+        assert_ne!(firewall.color, load_balancer.color);
         assert_ne!(load_balancer.color, server.color);
     }
 
@@ -1153,6 +1223,11 @@ mod tests {
         );
         assert_eq!(scale_for_state(ServiceState::Operational, 0.0), 1.0);
         assert_eq!(scale_for_state(ServiceState::Operational, 5.0), 1.0);
+        let disrupted = ServiceState::Disrupted { ticks_remaining: 2 };
+        assert_ne!(
+            scale_for_state(disrupted, 0.0),
+            scale_for_state(disrupted, 1.0)
+        );
     }
 
     #[test]
@@ -1301,30 +1376,42 @@ mod tests {
             GridPosition::new(0, 0),
         )
         .expect("gateway placement is valid");
+        let firewall = build_service(
+            &mut simulation,
+            ServiceKind::Firewall,
+            GridPosition::new(1, 0),
+        )
+        .expect("firewall placement is valid");
         let load_balancer = build_service(
             &mut simulation,
             ServiceKind::LoadBalancer,
-            GridPosition::new(1, 0),
+            GridPosition::new(2, 0),
         )
         .expect("load-balancer placement is valid");
         let server = build_service(
             &mut simulation,
             ServiceKind::ApplicationServer,
-            GridPosition::new(2, 0),
+            GridPosition::new(3, 0),
         )
         .expect("server placement is valid");
         simulation
             .apply(GameCommand::ConnectServices {
                 from: gateway.id(),
-                to: load_balancer.id(),
+                to: firewall.id(),
             })
             .expect("first test connection is affordable");
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: firewall.id(),
+                to: load_balancer.id(),
+            })
+            .expect("second test connection is affordable");
         simulation
             .apply(GameCommand::ConnectServices {
                 from: load_balancer.id(),
                 to: server.id(),
             })
-            .expect("second test connection is affordable");
+            .expect("third test connection is affordable");
 
         let mut total_served = 0;
         for _ in 0..ServiceKind::ApplicationServer.construction_ticks() {
@@ -1336,13 +1423,20 @@ mod tests {
             tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             paused: false,
             total_served,
+            blocked_attacks: 0,
         };
         let objectives = objective_statuses(&client);
-        assert!(objectives[..4].iter().all(|objective| objective.complete));
-        assert!(!objectives[4].complete);
+        assert!(objectives[..5].iter().all(|objective| objective.complete));
+        assert!(!objectives[5].complete);
+        assert!(!objectives[6].complete);
 
-        while client.total_served < SERVED_OBJECTIVE {
-            client.total_served += client.simulation.advance().served;
+        while client.simulation.tick().number() < CYBER_ATTACK_INTERVAL {
+            let report = client.simulation.advance();
+            client.total_served += report.served;
+            if report.cyberattack.is_some_and(|attack| attack.blocked) {
+                client.blocked_attacks += 1;
+            }
+            client.last_report = Some(report);
         }
         assert!(
             objective_statuses(&client)
@@ -1350,6 +1444,12 @@ mod tests {
                 .all(|objective| objective.complete)
         );
         assert!(objectives_text(&client).contains("[x] Serve 500 total requests"));
+        let mut progress = GameProgress::new();
+        let notification = take_attack_notification(&client, &mut progress)
+            .expect("the attack on tick eight is announced");
+        assert!(notification.contains("CYBERATTACK BLOCKED"));
+        assert!(notification.contains("Application Server #4 protected"));
+        assert_eq!(take_attack_notification(&client, &mut progress), None);
     }
 
     #[test]
@@ -1374,12 +1474,20 @@ mod tests {
             },
             ObjectiveStatus {
                 label: "five",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "six",
+                complete: true,
+            },
+            ObjectiveStatus {
+                label: "seven",
                 complete: false,
             },
         ];
         assert_eq!(
             apply_objective_progress(&mut progress, partial),
-            ProgressEvent::Completed(vec!["one", "two", "three", "four"])
+            ProgressEvent::Completed(vec!["one", "two", "three", "four", "five", "six"])
         );
         assert_eq!(
             apply_objective_progress(&mut progress, partial),
@@ -1431,6 +1539,7 @@ mod tests {
             tick_timer: Timer::from_seconds(9.0, TimerMode::Repeating),
             paused: true,
             total_served: 900,
+            blocked_attacks: 3,
         };
         let mut tool = BuildTool {
             selected: ServiceKind::InternetGateway,
@@ -1441,7 +1550,7 @@ mod tests {
             feedback: "Old state".to_owned(),
         };
         let mut progress = GameProgress::new();
-        progress.completed = [true; 5];
+        progress.completed = [true; OBJECTIVE_COUNT];
         progress.won = true;
         progress.notification = Some("VICTORY".to_owned());
 
@@ -1453,11 +1562,12 @@ mod tests {
         assert_eq!(client.last_report, None);
         assert!(!client.paused);
         assert_eq!(client.total_served, 0);
+        assert_eq!(client.blocked_attacks, 0);
         assert_eq!(tool.selected, ServiceKind::ApplicationServer);
         assert!(!tool.connecting);
         assert_eq!(tool.connection_from, None);
         assert_eq!(tool.inspected, None);
-        assert_eq!(progress.completed, [false; 5]);
+        assert_eq!(progress.completed, [false; OBJECTIVE_COUNT]);
         assert!(!progress.won);
         assert_eq!(progress.notification.as_deref(), Some("Scenario restarted"));
     }
@@ -1471,6 +1581,7 @@ mod tests {
             tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             paused: false,
             total_served: 0,
+            blocked_attacks: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1499,6 +1610,7 @@ mod tests {
             tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             paused: false,
             total_served: 0,
+            blocked_attacks: 0,
         };
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
@@ -1527,6 +1639,7 @@ mod tests {
             tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             paused: false,
             total_served: 150,
+            blocked_attacks: 0,
         };
 
         let text = inspection_text(&client, inspected).expect("the inspected service exists");
