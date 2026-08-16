@@ -1,3 +1,4 @@
+mod audio;
 mod bevy_client;
 mod render;
 

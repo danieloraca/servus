@@ -55,6 +55,7 @@ In the graphical client:
 - press Escape to cancel connection mode;
 - right-click a service to inspect its state, capacity, links, and current traffic;
 - press U to upgrade the inspected service; cyan rings show Scaled and Enterprise tiers;
+- press M to mute sound and [ or ] to adjust the volume;
 - compare revenue, operating costs, capital investment, and ROI in the economics panel;
 - watch yellow request markers follow the exact traffic routed through each link;
 - use - and + to decrease or increase incoming demand by 50 requests per tick;

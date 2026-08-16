@@ -9,6 +9,7 @@ use servus_sim::{
     TickReport,
 };
 
+use crate::audio::{SoundEffect, SoundEngine};
 #[cfg(test)]
 use crate::create_demo_scenario;
 use crate::create_new_game;
@@ -41,6 +42,32 @@ struct ClientSimulation {
     operating_costs: u64,
     operating_cost_shortfall: u64,
     operating_profit: i128,
+}
+
+#[derive(Resource)]
+struct AudioSettings {
+    enabled: bool,
+    volume: f32,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            volume: 0.65,
+        }
+    }
+}
+
+#[derive(Default, Resource)]
+struct SoundQueue(Vec<SoundEffect>);
+
+impl SoundQueue {
+    fn push(&mut self, effect: SoundEffect) {
+        if !self.0.contains(&effect) {
+            self.0.push(effect);
+        }
+    }
 }
 
 #[derive(Component)]
@@ -181,6 +208,9 @@ pub fn run_bevy_client() {
             inspected: None,
             feedback: "Select with 1–4, then click a free tile".to_owned(),
         })
+        .insert_resource(AudioSettings::default())
+        .insert_resource(SoundQueue::default())
+        .insert_non_send(SoundEngine::new())
         .insert_resource(GameProgress::new())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -199,6 +229,7 @@ pub fn run_bevy_client() {
                 toggle_pause,
                 select_building,
                 toggle_network_mode,
+                update_audio_controls,
                 adjust_demand,
                 upgrade_inspected_service,
                 move_camera,
@@ -217,6 +248,7 @@ pub fn run_bevy_client() {
                 inspect_service,
                 handle_map_click,
                 update_objective_progress,
+                play_pending_sounds,
                 draw_map,
             )
                 .chain()
@@ -250,7 +282,7 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD: move   1–4: build   C: connect   X: disconnect   U: upgrade   R: restart"),
+        Text::new("WASD move   1–4 build   C link   X unlink   U upgrade   M sound   [ ] volume"),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -343,9 +375,63 @@ fn toggle_pause(
     keys: Res<ButtonInput<KeyCode>>,
     progress: Res<GameProgress>,
     mut client: ResMut<ClientSimulation>,
+    mut sounds: ResMut<SoundQueue>,
 ) {
     if keys.just_pressed(KeyCode::Space) && !progress.won {
         client.paused = !client.paused;
+        sounds.push(if client.paused {
+            SoundEffect::Pause
+        } else {
+            SoundEffect::Resume
+        });
+    }
+}
+
+fn update_audio_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<AudioSettings>,
+    mut sounds: ResMut<SoundQueue>,
+    mut tool: ResMut<BuildTool>,
+) {
+    if keys.just_pressed(KeyCode::KeyM) {
+        settings.enabled = !settings.enabled;
+        tool.feedback = format!(
+            "Sound {} at {:.0}%",
+            if settings.enabled { "on" } else { "muted" },
+            settings.volume * 100.0
+        );
+        if settings.enabled {
+            sounds.push(SoundEffect::Toggle);
+        }
+        return;
+    }
+    let direction = if keys.just_pressed(KeyCode::BracketLeft) {
+        Some(-1.0)
+    } else if keys.just_pressed(KeyCode::BracketRight) {
+        Some(1.0)
+    } else {
+        None
+    };
+    if let Some(direction) = direction {
+        settings.volume = adjusted_sound_volume(settings.volume, direction);
+        tool.feedback = format!("Sound volume {:.0}%", settings.volume * 100.0);
+        if settings.enabled {
+            sounds.push(SoundEffect::Toggle);
+        }
+    }
+}
+
+fn play_pending_sounds(
+    settings: Res<AudioSettings>,
+    mut sounds: ResMut<SoundQueue>,
+    engine: NonSend<SoundEngine>,
+) {
+    if settings.enabled {
+        for effect in sounds.0.drain(..) {
+            engine.play(effect, settings.volume);
+        }
+    } else {
+        sounds.0.clear();
     }
 }
 
@@ -419,12 +505,14 @@ fn upgrade_inspected_service(
     keys: Res<ButtonInput<KeyCode>>,
     mut client: ResMut<ClientSimulation>,
     mut tool: ResMut<BuildTool>,
+    mut sounds: ResMut<SoundQueue>,
 ) {
     if !keys.just_pressed(KeyCode::KeyU) {
         return;
     }
     let Some(id) = tool.inspected else {
         tool.feedback = "Right-click a service before upgrading it".to_owned();
+        sounds.push(SoundEffect::Error);
         return;
     };
 
@@ -440,8 +528,12 @@ fn upgrade_inspected_service(
                 upgrade.to,
                 upgrade.cost
             );
+            sounds.push(SoundEffect::UpgradeStarted);
         }
-        Err(error) => tool.feedback = format!("Cannot upgrade: {error}"),
+        Err(error) => {
+            tool.feedback = format!("Cannot upgrade: {error}");
+            sounds.push(SoundEffect::Error);
+        }
     }
 }
 
@@ -499,6 +591,7 @@ fn handle_map_click(
     mouse: Res<ButtonInput<MouseButton>>,
     mut client: ResMut<ClientSimulation>,
     mut tool: ResMut<BuildTool>,
+    mut sounds: ResMut<SoundQueue>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -527,6 +620,7 @@ fn handle_map_click(
                     service_description(&client.simulation, from),
                     service_description(&client.simulation, to)
                 );
+                sounds.push(SoundEffect::LinkConnected);
             }
             Ok(ConnectionAction::Disconnected { from, to }) => {
                 tool.feedback = format!(
@@ -534,6 +628,7 @@ fn handle_map_click(
                     service_description(&client.simulation, from),
                     service_description(&client.simulation, to)
                 );
+                sounds.push(SoundEffect::LinkDisconnected);
             }
             Err(error) => {
                 let action = match mode {
@@ -541,6 +636,7 @@ fn handle_map_click(
                     NetworkMode::Disconnect => "disconnect",
                 };
                 tool.feedback = format!("Cannot {action}: {error}");
+                sounds.push(SoundEffect::Error);
             }
         }
         return;
@@ -558,21 +654,49 @@ fn handle_map_click(
                 position.x,
                 position.y
             );
+            sounds.push(SoundEffect::BuildPlaced);
         }
         Err(error) => {
             tool.feedback = format!("Cannot build: {error}");
+            sounds.push(SoundEffect::Error);
         }
     }
 }
 
-fn advance_simulation(time: Res<Time>, mut client: ResMut<ClientSimulation>) {
+fn advance_simulation(
+    time: Res<Time>,
+    mut client: ResMut<ClientSimulation>,
+    mut sounds: ResMut<SoundQueue>,
+) {
     if client.paused {
         return;
     }
 
     client.tick_timer.tick(time.delta());
     if client.tick_timer.just_finished() {
+        let upgrades_in_progress = client
+            .simulation
+            .services()
+            .iter()
+            .filter_map(|service| match service.state() {
+                ServiceState::Upgrading { target, .. } => Some((service.id(), target)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let report = client.simulation.advance();
+        let upgrade_completed = upgrades_in_progress.iter().any(|(id, target)| {
+            client
+                .simulation
+                .service(*id)
+                .is_some_and(|service| service.is_operational() && service.tier() == *target)
+        });
+        for effect in tick_sound_effects(
+            !report.completed_services.is_empty(),
+            upgrade_completed,
+            report.cyberattack.map(|attack| attack.blocked),
+        ) {
+            sounds.push(effect);
+        }
         client.total_served = client.total_served.saturating_add(report.served);
         if report.cyberattack.is_some_and(|attack| attack.blocked) {
             client.blocked_attacks = client.blocked_attacks.saturating_add(1);
@@ -881,6 +1005,32 @@ fn adjusted_demand(current: u64, increase: bool) -> u64 {
     }
 }
 
+fn adjusted_sound_volume(current: f32, direction: f32) -> f32 {
+    (current + direction * 0.1).clamp(0.0, 1.0)
+}
+
+fn tick_sound_effects(
+    construction_completed: bool,
+    upgrade_completed: bool,
+    attack_blocked: Option<bool>,
+) -> Vec<SoundEffect> {
+    let mut effects = Vec::new();
+    if construction_completed {
+        effects.push(SoundEffect::ConstructionComplete);
+    }
+    if upgrade_completed {
+        effects.push(SoundEffect::UpgradeComplete);
+    }
+    if let Some(blocked) = attack_blocked {
+        effects.push(if blocked {
+            SoundEffect::AttackBlocked
+        } else {
+            SoundEffect::Breach
+        });
+    }
+    effects
+}
+
 fn ticks_until_attack(tick: u64) -> u64 {
     CYBER_ATTACK_INTERVAL - tick % CYBER_ATTACK_INTERVAL
 }
@@ -1162,8 +1312,12 @@ fn apply_objective_progress(
 fn update_objective_progress(
     mut client: ResMut<ClientSimulation>,
     mut progress: ResMut<GameProgress>,
+    mut sounds: ResMut<SoundQueue>,
 ) {
     let event = apply_objective_progress(&mut progress, objective_statuses(&client));
+    if let Some(effect) = progress_sound(&event) {
+        sounds.push(effect);
+    }
     let attack_notification = take_attack_notification(&client, &mut progress);
     let notification = match event {
         ProgressEvent::None => attack_notification,
@@ -1179,6 +1333,14 @@ fn update_objective_progress(
     if let Some(notification) = notification {
         progress.notification = Some(notification);
         progress.notification_timer.reset();
+    }
+}
+
+fn progress_sound(event: &ProgressEvent) -> Option<SoundEffect> {
+    match event {
+        ProgressEvent::Completed(_) => Some(SoundEffect::ObjectiveComplete),
+        ProgressEvent::Victory => Some(SoundEffect::Victory),
+        ProgressEvent::None => None,
     }
 }
 
@@ -1380,7 +1542,7 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     let objectives = objectives_text(client);
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -1471,6 +1633,40 @@ mod tests {
         assert_eq!(ticks_until_attack(0), CYBER_ATTACK_INTERVAL);
         assert_eq!(ticks_until_attack(7), 1);
         assert_eq!(ticks_until_attack(8), CYBER_ATTACK_INTERVAL);
+    }
+
+    #[test]
+    fn sound_controls_and_gameplay_events_select_expected_cues() {
+        assert!((adjusted_sound_volume(0.5, 1.0) - 0.6).abs() < f32::EPSILON);
+        assert_eq!(adjusted_sound_volume(1.0, 1.0), 1.0);
+        assert_eq!(adjusted_sound_volume(0.0, -1.0), 0.0);
+        assert_eq!(
+            tick_sound_effects(true, true, Some(true)),
+            vec![
+                SoundEffect::ConstructionComplete,
+                SoundEffect::UpgradeComplete,
+                SoundEffect::AttackBlocked,
+            ]
+        );
+        assert_eq!(
+            tick_sound_effects(false, false, Some(false)),
+            vec![SoundEffect::Breach]
+        );
+        assert!(tick_sound_effects(false, false, None).is_empty());
+        assert_eq!(
+            progress_sound(&ProgressEvent::Completed(vec!["objective"])),
+            Some(SoundEffect::ObjectiveComplete)
+        );
+        assert_eq!(
+            progress_sound(&ProgressEvent::Victory),
+            Some(SoundEffect::Victory)
+        );
+        assert_eq!(progress_sound(&ProgressEvent::None), None);
+
+        let mut queue = SoundQueue::default();
+        queue.push(SoundEffect::Error);
+        queue.push(SoundEffect::Error);
+        assert_eq!(queue.0, vec![SoundEffect::Error]);
     }
 
     #[test]
