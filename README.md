@@ -72,9 +72,14 @@ cargo run -p servus-game --bin servus-ascii
 
 In the graphical client:
 
+- press B to enter foundation mode; repeated presses cycle Small (4 floors), Tower (10), and
+  Megatower (24), then click a free area to place the lot;
+- press 1 through 7 to select an infrastructure floor, then click a solution building to install
+  it; the building grows upward with every installed service;
+- right-click a building to inspect its foundation, height, free floors, and installed services;
 - select a Gateway, Load Balancer, Application Server, Firewall, Relational Database, Key-Value
-  Store, or Cache with 1 through 7;
-- click a highlighted free map tile to build;
+  Store, or Cache with 1 through 7; clicking a free tile still uses legacy standalone placement
+  during the client migration;
 - press C, then click a source service and destination service to create a directed connection;
 - press X, then click its source and destination to remove a directed connection without a refund;
 - press Escape to cancel connection mode;

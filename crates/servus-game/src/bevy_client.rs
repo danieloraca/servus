@@ -4,9 +4,9 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResolution};
 use servus_sim::{
-    CYBER_ATTACK_INTERVAL, CommandError, CommandOutcome, GameCommand, GridPosition, MapSize,
-    NETWORK_LINK_COST, Service, ServiceId, ServiceKind, ServiceState, ServiceTier, Simulation,
-    TickReport,
+    CYBER_ATTACK_INTERVAL, CommandError, CommandOutcome, Footprint, FoundationKind, GameCommand,
+    GridPosition, MapSize, NETWORK_LINK_COST, Service, ServiceId, ServiceKind, ServiceState,
+    ServiceTier, Simulation, Solution, SolutionId, TickReport,
 };
 
 use crate::audio::{SoundEffect, SoundEngine};
@@ -83,6 +83,14 @@ impl SoundQueue {
 struct ServiceVisual(ServiceId);
 
 #[derive(Component)]
+struct SolutionVisual(SolutionId);
+
+#[derive(Component)]
+struct SolutionLabel;
+
+type MapVisualFilter = Or<(With<ServiceVisual>, With<SolutionVisual>)>;
+
+#[derive(Component)]
 struct BuildPreviewVisual;
 
 #[derive(Component)]
@@ -104,6 +112,9 @@ struct BuildTool {
     network_mode: Option<NetworkMode>,
     connection_from: Option<ServiceId>,
     inspected: Option<ServiceId>,
+    inspected_solution: Option<SolutionId>,
+    foundation_mode: bool,
+    foundation: FoundationKind,
     feedback: String,
 }
 
@@ -221,6 +232,9 @@ pub fn run_bevy_client() {
             network_mode: None,
             connection_from: None,
             inspected: None,
+            inspected_solution: None,
+            foundation_mode: false,
+            foundation: FoundationKind::SmallLot,
             feedback: "Select with 1–7, then click a free tile".to_owned(),
         })
         .insert_resource(AudioSettings::default())
@@ -243,6 +257,7 @@ pub fn run_bevy_client() {
                 restart_game,
                 toggle_pause,
                 select_building,
+                toggle_foundation_mode,
                 toggle_network_mode,
                 update_audio_controls,
                 adjust_demand,
@@ -295,7 +310,12 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
 
     let map_size = client.simulation.map().size();
     for service in client.simulation.services() {
-        spawn_service_visual(&mut commands, map_size, *service);
+        if service.solution().is_none() {
+            spawn_service_visual(&mut commands, map_size, *service);
+        }
+    }
+    for solution in client.simulation.solutions() {
+        spawn_solution_visual(&mut commands, map_size, solution);
     }
 
     commands.spawn((
@@ -315,7 +335,7 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD move   1–7 build   C link   X unlink   U upgrade   M sound   [ ] volume"),
+        Text::new("WASD move   B foundation   1–7 floor/service   C link   X unlink   U upgrade"),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -378,10 +398,29 @@ fn spawn_service_visual(commands: &mut Commands, map_size: MapSize, service: Ser
         });
 }
 
+fn spawn_solution_visual(commands: &mut Commands, map_size: MapSize, solution: &Solution) {
+    let (world_position, visual_size) = solution_visual_geometry(map_size, solution);
+    commands
+        .spawn((
+            Sprite::from_color(solution_color(solution), visual_size),
+            Transform::from_xyz(world_position.x, world_position.y, 1.2),
+            SolutionVisual(solution.id()),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text2d::new(solution_label(solution)),
+                TextFont::from_font_size(15.0),
+                TextColor(Color::WHITE),
+                Transform::from_xyz(0.0, 0.0, 0.1),
+                SolutionLabel,
+            ));
+        });
+}
+
 fn restart_game(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
-    service_visuals: Query<Entity, With<ServiceVisual>>,
+    map_visuals: Query<Entity, MapVisualFilter>,
     mut client: ResMut<ClientSimulation>,
     mut tool: ResMut<BuildTool>,
     mut progress: ResMut<GameProgress>,
@@ -390,7 +429,7 @@ fn restart_game(
     if !keys.just_pressed(KeyCode::KeyR) {
         return;
     }
-    for entity in &service_visuals {
+    for entity in &map_visuals {
         commands.entity(entity).despawn();
     }
     reset_scenario(&mut client, &mut tool, &mut progress);
@@ -487,10 +526,35 @@ fn select_building(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>)
 
     if let Some(kind) = selected {
         tool.selected = kind;
+        tool.foundation_mode = false;
         tool.network_mode = None;
         tool.connection_from = None;
         tool.feedback = selection_feedback(kind);
     }
+}
+
+fn toggle_foundation_mode(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>) {
+    if !keys.just_pressed(KeyCode::KeyB) {
+        return;
+    }
+    tool.foundation = if tool.foundation_mode {
+        match tool.foundation {
+            FoundationKind::SmallLot => FoundationKind::TowerLot,
+            FoundationKind::TowerLot => FoundationKind::MegatowerLot,
+            FoundationKind::MegatowerLot => FoundationKind::SmallLot,
+        }
+    } else {
+        FoundationKind::SmallLot
+    };
+    tool.foundation_mode = true;
+    tool.network_mode = None;
+    tool.connection_from = None;
+    tool.feedback = format!(
+        "Foundation: {} — {} floors, {} credits",
+        foundation_name(tool.foundation),
+        tool.foundation.maximum_floors(),
+        tool.foundation.build_cost()
+    );
 }
 
 fn toggle_network_mode(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>) {
@@ -605,10 +669,14 @@ fn update_hovered_tile(
     mut tool: ResMut<BuildTool>,
 ) {
     let (camera, camera_transform) = *camera;
+    let map_size = client.simulation.map().size();
     tool.hovered = window
         .cursor_position()
         .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
-        .and_then(|world| world_to_grid(client.simulation.map().size(), world));
+        .and_then(|world| {
+            solution_position_at_world(&client.simulation, world)
+                .or_else(|| world_to_grid(map_size, world))
+        });
 }
 
 fn update_build_preview(
@@ -622,6 +690,27 @@ fn update_build_preview(
         **visibility = Visibility::Hidden;
         return;
     };
+
+    if tool.foundation_mode {
+        let footprint = tool.foundation.footprint();
+        let valid = can_build_solution(&client.simulation, tool.foundation, position);
+        sprite.color = if valid {
+            Color::srgba(0.42, 0.62, 0.82, 0.38)
+        } else {
+            Color::srgba(0.95, 0.12, 0.15, 0.38)
+        };
+        sprite.custom_size = Some(footprint_visual_size(footprint));
+        transform.translation =
+            footprint_center(client.simulation.map().size(), position, footprint).extend(0.8);
+        **label = Text2d::new(foundation_abbreviation(tool.foundation));
+        **visibility = Visibility::Visible;
+        return;
+    }
+
+    if client.simulation.map().solution_at(position).is_some() {
+        **visibility = Visibility::Hidden;
+        return;
+    }
 
     let kind = tool.selected;
     let valid = can_build(&client.simulation, kind, position);
@@ -640,9 +729,14 @@ fn inspect_service(
     mut tool: ResMut<BuildTool>,
 ) {
     if mouse.just_pressed(MouseButton::Right) {
-        tool.inspected = tool
-            .hovered
-            .and_then(|position| client.simulation.map().service_at(position));
+        let position = tool.hovered;
+        tool.inspected_solution =
+            position.and_then(|position| client.simulation.map().solution_at(position));
+        tool.inspected = if tool.inspected_solution.is_none() {
+            position.and_then(|position| client.simulation.map().service_at(position))
+        } else {
+            None
+        };
     }
 }
 
@@ -652,6 +746,7 @@ fn handle_map_click(
     mut client: ResMut<ClientSimulation>,
     mut tool: ResMut<BuildTool>,
     mut sounds: ResMut<SoundQueue>,
+    solution_visuals: Query<(Entity, &SolutionVisual)>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -696,6 +791,66 @@ fn handle_map_click(
                     NetworkMode::Disconnect => "disconnect",
                 };
                 tool.feedback = format!("Cannot {action}: {error}");
+                sounds.push(SoundEffect::Error);
+            }
+        }
+        return;
+    }
+
+    if tool.foundation_mode {
+        match build_solution(&mut client.simulation, tool.foundation, position) {
+            Ok(solution) => {
+                client.capital_invested = client
+                    .capital_invested
+                    .saturating_add(solution.foundation().build_cost());
+                spawn_solution_visual(&mut commands, client.simulation.map().size(), &solution);
+                tool.inspected_solution = Some(solution.id());
+                tool.inspected = None;
+                tool.feedback = format!(
+                    "Built {} #{}; select a service and click the building",
+                    foundation_name(solution.foundation()),
+                    solution.id().value()
+                );
+                sounds.push(SoundEffect::BuildPlaced);
+            }
+            Err(error) => {
+                tool.feedback = format!("Cannot build foundation: {error}");
+                sounds.push(SoundEffect::Error);
+            }
+        }
+        return;
+    }
+
+    if let Some(solution_id) = client.simulation.map().solution_at(position) {
+        match install_service(&mut client.simulation, solution_id, tool.selected) {
+            Ok(service) => {
+                client.capital_invested = client
+                    .capital_invested
+                    .saturating_add(service.kind().build_cost());
+                if let Some((entity, _)) = solution_visuals
+                    .iter()
+                    .find(|(_, visual)| visual.0 == solution_id)
+                {
+                    commands.entity(entity).despawn();
+                }
+                let solution = client
+                    .simulation
+                    .solution(solution_id)
+                    .expect("successful installation keeps its solution")
+                    .clone();
+                spawn_solution_visual(&mut commands, client.simulation.map().size(), &solution);
+                tool.inspected_solution = Some(solution_id);
+                tool.inspected = None;
+                tool.feedback = format!(
+                    "Installed {} on floor {} of solution #{}",
+                    service_kind_name(service.kind()),
+                    solution.floor_count(),
+                    solution_id.value()
+                );
+                sounds.push(SoundEffect::BuildPlaced);
+            }
+            Err(error) => {
+                tool.feedback = format!("Cannot install floor: {error}");
                 sounds.push(SoundEffect::Error);
             }
         }
@@ -868,6 +1023,9 @@ fn draw_map(
     }
 
     for service in simulation.services() {
+        if service.solution().is_some() {
+            continue;
+        }
         let center = service_world_position(map_size, service);
         let size = service_visual_size(service.kind());
         for ring in 0..tier_ring_count(service.tier()) {
@@ -884,6 +1042,9 @@ fn draw_map(
         else {
             continue;
         };
+        if from.solution().is_some() || to.solution().is_some() {
+            continue;
+        }
         let start = service_world_position(map_size, from);
         let end = service_world_position(map_size, to);
         let selected_for_removal = tool.network_mode == Some(NetworkMode::Disconnect)
@@ -904,6 +1065,9 @@ fn draw_map(
             ) else {
                 continue;
             };
+            if from.solution().is_some() || to.solution().is_some() {
+                continue;
+            }
             let start = service_world_position(map_size, from);
             let end = service_world_position(map_size, to);
             for marker in traffic_markers(start, end, traffic.requests, time.elapsed_secs()) {
@@ -918,6 +1082,17 @@ fn draw_map(
         gizmos.rect_2d(
             service_world_position(map_size, service),
             service_visual_size(service.kind()) + Vec2::splat(16.0),
+            Color::srgb(0.3, 0.95, 1.0),
+        );
+    }
+
+    if let Some(id) = tool.inspected_solution
+        && let Some(solution) = simulation.solution(id)
+    {
+        let (center, size) = solution_visual_geometry(map_size, solution);
+        gizmos.rect_2d(
+            center,
+            size + Vec2::splat(14.0),
             Color::srgb(0.3, 0.95, 1.0),
         );
     }
@@ -971,16 +1146,40 @@ fn draw_map(
             );
         }
     } else if let Some(position) = tool.hovered {
-        let color = if can_build(simulation, tool.selected, position) {
-            Color::srgb(0.35, 0.95, 0.58)
+        if tool.foundation_mode {
+            let footprint = tool.foundation.footprint();
+            let color = if can_build_solution(simulation, tool.foundation, position) {
+                Color::srgb(0.35, 0.95, 0.58)
+            } else {
+                Color::srgb(0.95, 0.3, 0.32)
+            };
+            gizmos.rect_2d(
+                footprint_center(map_size, position, footprint),
+                footprint_visual_size(footprint) + Vec2::splat(8.0),
+                color,
+            );
+        } else if let Some(solution_id) = simulation.map().solution_at(position)
+            && let Some(solution) = simulation.solution(solution_id)
+        {
+            let color = if can_install_service(simulation, solution_id, tool.selected) {
+                Color::srgb(0.35, 0.95, 0.58)
+            } else {
+                Color::srgb(0.95, 0.3, 0.32)
+            };
+            let (center, size) = solution_visual_geometry(map_size, solution);
+            gizmos.rect_2d(center, size + Vec2::splat(8.0), color);
         } else {
-            Color::srgb(0.95, 0.3, 0.32)
-        };
-        gizmos.rect_2d(
-            footprint_world_position(map_size, position, tool.selected),
-            service_visual_size(tool.selected) + Vec2::splat(8.0),
-            color,
-        );
+            let color = if can_build(simulation, tool.selected, position) {
+                Color::srgb(0.35, 0.95, 0.58)
+            } else {
+                Color::srgb(0.95, 0.3, 0.32)
+            };
+            gizmos.rect_2d(
+                footprint_world_position(map_size, position, tool.selected),
+                service_visual_size(tool.selected) + Vec2::splat(8.0),
+                color,
+            );
+        }
     }
 }
 
@@ -1039,7 +1238,10 @@ fn grid_to_world(map_size: MapSize, position: GridPosition) -> Vec2 {
 }
 
 fn service_visual_size(kind: ServiceKind) -> Vec2 {
-    let footprint = kind.footprint();
+    footprint_visual_size(kind.footprint())
+}
+
+fn footprint_visual_size(footprint: Footprint) -> Vec2 {
     Vec2::new(
         f32::from(footprint.width()) * TILE_SIZE - (TILE_SIZE - SERVICE_SIZE),
         f32::from(footprint.height()) * TILE_SIZE - (TILE_SIZE - SERVICE_SIZE),
@@ -1047,12 +1249,49 @@ fn service_visual_size(kind: ServiceKind) -> Vec2 {
 }
 
 fn footprint_world_position(map_size: MapSize, position: GridPosition, kind: ServiceKind) -> Vec2 {
-    let footprint = kind.footprint();
+    footprint_center(map_size, position, kind.footprint())
+}
+
+fn footprint_center(map_size: MapSize, position: GridPosition, footprint: Footprint) -> Vec2 {
     grid_to_world(map_size, position)
         + Vec2::new(
             f32::from(footprint.width() - 1) * TILE_SIZE / 2.0,
             -f32::from(footprint.height() - 1) * TILE_SIZE / 2.0,
         )
+}
+
+fn solution_visual_geometry(map_size: MapSize, solution: &Solution) -> (Vec2, Vec2) {
+    let footprint = solution.foundation().footprint();
+    let lot_center = footprint_center(map_size, solution.position(), footprint);
+    let width = footprint_visual_size(footprint).x;
+    let height = 30.0 + f32::from(solution.floor_count()) * 18.0;
+    let lot_bottom = lot_center.y - f32::from(footprint.height()) * TILE_SIZE / 2.0 + 10.0;
+    (
+        Vec2::new(lot_center.x, lot_bottom + height / 2.0),
+        Vec2::new(width, height),
+    )
+}
+
+fn solution_position_at_world(simulation: &Simulation, world: Vec2) -> Option<GridPosition> {
+    let map_size = simulation.map().size();
+    simulation.solutions().iter().rev().find_map(|solution| {
+        let (center, size) = solution_visual_geometry(map_size, solution);
+        let offset = (world - center).abs();
+        (offset.x <= size.x / 2.0 && offset.y <= size.y / 2.0).then_some(solution.position())
+    })
+}
+
+fn solution_color(solution: &Solution) -> Color {
+    let floor_factor = (f32::from(solution.floor_count()) / 24.0).min(1.0);
+    match solution.foundation() {
+        FoundationKind::SmallLot => Color::srgb(0.24, 0.46 + floor_factor * 0.2, 0.68),
+        FoundationKind::TowerLot => Color::srgb(0.38, 0.35 + floor_factor * 0.2, 0.72),
+        FoundationKind::MegatowerLot => Color::srgb(0.2, 0.56, 0.58 + floor_factor * 0.25),
+    }
+}
+
+fn solution_label(solution: &Solution) -> String {
+    format!("S{}\n{}F", solution.id().value(), solution.floor_count())
 }
 
 fn service_world_position(map_size: MapSize, service: &Service) -> Vec2 {
@@ -1149,10 +1388,75 @@ fn build_service(
     }
 }
 
+fn build_solution(
+    simulation: &mut Simulation,
+    foundation: FoundationKind,
+    position: GridPosition,
+) -> Result<Solution, CommandError> {
+    let outcome = simulation.apply(GameCommand::BuildSolution {
+        foundation,
+        position,
+    })?;
+    match outcome {
+        CommandOutcome::SolutionBuilt { id, .. } => Ok(simulation
+            .solution(id)
+            .expect("a successful foundation command inserts its solution")
+            .clone()),
+        CommandOutcome::ServiceBuilt { .. }
+        | CommandOutcome::ServiceInstalled { .. }
+        | CommandOutcome::ServicesConnected { .. }
+        | CommandOutcome::ServicesDisconnected { .. }
+        | CommandOutcome::ServiceUpgradeStarted { .. } => {
+            unreachable!("a foundation command must produce a solution")
+        }
+    }
+}
+
+fn install_service(
+    simulation: &mut Simulation,
+    solution: SolutionId,
+    kind: ServiceKind,
+) -> Result<Service, CommandError> {
+    let outcome = simulation.apply(GameCommand::InstallService { solution, kind })?;
+    match outcome {
+        CommandOutcome::ServiceInstalled { id, .. } => Ok(*simulation
+            .service(id)
+            .expect("a successful install command inserts its service")),
+        CommandOutcome::SolutionBuilt { .. }
+        | CommandOutcome::ServiceBuilt { .. }
+        | CommandOutcome::ServicesConnected { .. }
+        | CommandOutcome::ServicesDisconnected { .. }
+        | CommandOutcome::ServiceUpgradeStarted { .. } => {
+            unreachable!("an install command must produce a service floor")
+        }
+    }
+}
+
 fn can_build(simulation: &Simulation, kind: ServiceKind, position: GridPosition) -> bool {
     let mut preview = simulation.clone();
     preview
         .apply(GameCommand::BuildService { kind, position })
+        .is_ok()
+}
+
+fn can_build_solution(
+    simulation: &Simulation,
+    foundation: FoundationKind,
+    position: GridPosition,
+) -> bool {
+    let mut preview = simulation.clone();
+    preview
+        .apply(GameCommand::BuildSolution {
+            foundation,
+            position,
+        })
+        .is_ok()
+}
+
+fn can_install_service(simulation: &Simulation, solution: SolutionId, kind: ServiceKind) -> bool {
+    let mut preview = simulation.clone();
+    preview
+        .apply(GameCommand::InstallService { solution, kind })
         .is_ok()
 }
 
@@ -1317,6 +1621,41 @@ fn inspection_text(client: &ClientSimulation, id: ServiceId) -> Option<String> {
         outgoing_links,
         incoming_traffic,
         outgoing_traffic,
+    ))
+}
+
+fn solution_inspection_text(client: &ClientSimulation, id: SolutionId) -> Option<String> {
+    let solution = client.simulation.solution(id)?;
+    let mut floors = solution
+        .services()
+        .iter()
+        .take(8)
+        .enumerate()
+        .filter_map(|(floor, service_id)| {
+            client.simulation.service(*service_id).map(|service| {
+                format!(
+                    "F{:02}  {}  {}",
+                    floor + 1,
+                    service_kind_name(service.kind()),
+                    service.state()
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if solution.services().len() > 8 {
+        floors.push(format!("… {} more floors", solution.services().len() - 8));
+    }
+    if floors.is_empty() {
+        floors.push("No infrastructure installed".to_owned());
+    }
+    Some(format!(
+        "BUILDING\nSolution #{}\nFoundation    {}\nFloors        {}/{}\nFree floors   {}\n\n{}",
+        id.value(),
+        foundation_name(solution.foundation()),
+        solution.floor_count(),
+        solution.foundation().maximum_floors(),
+        solution.remaining_floors(),
+        floors.join("\n")
     ))
 }
 
@@ -1512,6 +1851,9 @@ fn reset_scenario(
     tool.network_mode = None;
     tool.connection_from = None;
     tool.inspected = None;
+    tool.inspected_solution = None;
+    tool.foundation_mode = false;
+    tool.foundation = FoundationKind::SmallLot;
     tool.feedback = "Scenario restarted; select with 1–7".to_owned();
 
     *progress = GameProgress::new();
@@ -1560,6 +1902,22 @@ fn service_kind_name(kind: ServiceKind) -> &'static str {
         ServiceKind::RelationalDatabase => "Relational Database",
         ServiceKind::KeyValueStore => "Key-Value Store",
         ServiceKind::Cache => "Cache",
+    }
+}
+
+fn foundation_name(foundation: FoundationKind) -> &'static str {
+    match foundation {
+        FoundationKind::SmallLot => "Small Lot",
+        FoundationKind::TowerLot => "Tower Lot",
+        FoundationKind::MegatowerLot => "Megatower Lot",
+    }
+}
+
+fn foundation_abbreviation(foundation: FoundationKind) -> &'static str {
+    match foundation {
+        FoundationKind::SmallLot => "S4",
+        FoundationKind::TowerLot => "T10",
+        FoundationKind::MegatowerLot => "M24",
     }
 }
 
@@ -1651,7 +2009,14 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let dropped = report.map_or(0, |report| report.dropped);
     let database_requests = report.map_or(0, |report| report.database_requests);
     let cache_hits = report.map_or(0, |report| report.cache_hits);
-    let mode = if let Some(network_mode) = tool.network_mode {
+    let mode = if tool.foundation_mode {
+        format!(
+            "Mode: Build {} ({}c / {} floors)",
+            foundation_name(tool.foundation),
+            tool.foundation.build_cost(),
+            tool.foundation.maximum_floors()
+        )
+    } else if let Some(network_mode) = tool.network_mode {
         let action = match network_mode {
             NetworkMode::Connect => "Connect",
             NetworkMode::Disconnect => "Disconnect",
@@ -1673,13 +2038,14 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         )
     };
     let inspection = tool
-        .inspected
-        .and_then(|id| inspection_text(client, id))
-        .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
+        .inspected_solution
+        .and_then(|id| solution_inspection_text(client, id))
+        .or_else(|| tool.inspected.and_then(|id| inspection_text(client, id)))
+        .unwrap_or_else(|| "INSPECT\nRight-click a service or building".to_owned());
     let objectives = objectives_text(client);
     let build_menu = build_menu_text();
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nDB requests  {:>6}\nCache hits   {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n{build_menu}C  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nDB requests  {:>6}\nCache hits   {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n{build_menu}B  Foundation / cycle size\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -1764,6 +2130,73 @@ mod tests {
             service_visual_size(ServiceKind::Cache),
             Vec2::splat(SERVICE_SIZE)
         );
+    }
+
+    #[test]
+    fn solution_building_grows_upward_and_remains_clickable_above_its_lot() {
+        let map = MapSize::new(8, 8).expect("valid map");
+        let mut simulation = Simulation::new(2_000, 0, map);
+        let empty = build_solution(
+            &mut simulation,
+            FoundationKind::TowerLot,
+            GridPosition::new(2, 3),
+        )
+        .expect("tower lot fits");
+        let (empty_center, empty_size) = solution_visual_geometry(map, &empty);
+        for kind in [
+            ServiceKind::InternetGateway,
+            ServiceKind::Firewall,
+            ServiceKind::LoadBalancer,
+            ServiceKind::ApplicationServer,
+        ] {
+            install_service(&mut simulation, empty.id(), kind).expect("floor is available");
+        }
+        let building = simulation.solution(empty.id()).expect("solution exists");
+        let (grown_center, grown_size) = solution_visual_geometry(map, building);
+
+        assert!(grown_size.y > empty_size.y);
+        assert_eq!(
+            grown_center.y - grown_size.y / 2.0,
+            empty_center.y - empty_size.y / 2.0
+        );
+        let upper_floor = Vec2::new(grown_center.x, grown_center.y + grown_size.y / 2.0 - 2.0);
+        assert_eq!(
+            solution_position_at_world(&simulation, upper_floor),
+            Some(building.position())
+        );
+    }
+
+    #[test]
+    fn foundation_and_floor_previews_validate_budget_and_capacity() {
+        let map = MapSize::new(8, 8).expect("valid map");
+        let mut simulation = Simulation::new(500, 0, map);
+        let position = GridPosition::new(1, 1);
+        assert!(can_build_solution(
+            &simulation,
+            FoundationKind::SmallLot,
+            position
+        ));
+        assert!(!can_build_solution(
+            &simulation,
+            FoundationKind::MegatowerLot,
+            position
+        ));
+        let solution = build_solution(&mut simulation, FoundationKind::SmallLot, position)
+            .expect("small lot is affordable");
+        for _ in 0..4 {
+            assert!(can_install_service(
+                &simulation,
+                solution.id(),
+                ServiceKind::InternetGateway
+            ));
+            install_service(&mut simulation, solution.id(), ServiceKind::InternetGateway)
+                .expect("floor is available");
+        }
+        assert!(!can_install_service(
+            &simulation,
+            solution.id(),
+            ServiceKind::Cache
+        ));
     }
 
     #[test]
@@ -2470,6 +2903,9 @@ mod tests {
             network_mode: Some(NetworkMode::Connect),
             connection_from: Some(inspected),
             inspected: Some(inspected),
+            inspected_solution: None,
+            foundation_mode: true,
+            foundation: FoundationKind::MegatowerLot,
             feedback: "Old state".to_owned(),
         };
         let mut progress = GameProgress::new();
@@ -2500,6 +2936,9 @@ mod tests {
         assert_eq!(tool.network_mode, None);
         assert_eq!(tool.connection_from, None);
         assert_eq!(tool.inspected, None);
+        assert_eq!(tool.inspected_solution, None);
+        assert!(!tool.foundation_mode);
+        assert_eq!(tool.foundation, FoundationKind::SmallLot);
         assert_eq!(progress.completed, [false; OBJECTIVE_COUNT]);
         assert!(!progress.won);
         assert_eq!(progress.notification.as_deref(), Some("Scenario restarted"));
@@ -2529,6 +2968,9 @@ mod tests {
             network_mode: None,
             connection_from: None,
             inspected: None,
+            inspected_solution: None,
+            foundation_mode: false,
+            foundation: FoundationKind::SmallLot,
             feedback: "Ready".to_owned(),
         };
         let text = metrics_text(&client, &tool, "RUNNING");
@@ -2599,6 +3041,9 @@ mod tests {
             network_mode: Some(NetworkMode::Connect),
             connection_from: Some(source),
             inspected: None,
+            inspected_solution: None,
+            foundation_mode: false,
+            foundation: FoundationKind::SmallLot,
             feedback: "Choose destination".to_owned(),
         };
         let text = metrics_text(&client, &tool, "RUNNING");
