@@ -34,7 +34,43 @@ struct MetricsText;
 struct BuildTool {
     selected: ServiceKind,
     hovered: Option<GridPosition>,
+    connecting: bool,
+    connection_from: Option<ServiceId>,
     feedback: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectionAction {
+    SourceSelected(ServiceId),
+    Connected { from: ServiceId, to: ServiceId },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ConnectionClickError {
+    EmptyTile(GridPosition),
+    Command(CommandError),
+}
+
+impl std::fmt::Display for ConnectionClickError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyTile(position) => write!(
+                formatter,
+                "tile ({}, {}) has no service",
+                position.x, position.y
+            ),
+            Self::Command(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionClickError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EmptyTile(_) => None,
+            Self::Command(error) => Some(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,6 +93,8 @@ pub fn run_bevy_client() {
         .insert_resource(BuildTool {
             selected: ServiceKind::ApplicationServer,
             hovered: None,
+            connecting: false,
+            connection_from: None,
             feedback: "Select with 1–3, then click a free tile".to_owned(),
         })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -74,6 +112,7 @@ pub fn run_bevy_client() {
             (
                 toggle_pause,
                 select_building,
+                toggle_connection_mode,
                 move_camera,
                 advance_simulation,
                 update_service_visuals,
@@ -83,7 +122,7 @@ pub fn run_bevy_client() {
         )
         .add_systems(
             PostUpdate,
-            (update_hovered_tile, place_selected_service, draw_map)
+            (update_hovered_tile, handle_map_click, draw_map)
                 .chain()
                 .after(TransformSystems::Propagate),
         )
@@ -115,7 +154,7 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD / arrows: move     Mouse wheel: zoom     Click: build"),
+        Text::new("WASD / arrows: move     Wheel: zoom     1–3: build     C: connect"),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -168,7 +207,25 @@ fn select_building(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>)
 
     if let Some(kind) = selected {
         tool.selected = kind;
+        tool.connecting = false;
+        tool.connection_from = None;
         tool.feedback = format!("Selected {}", service_kind_name(kind));
+    }
+}
+
+fn toggle_connection_mode(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>) {
+    if keys.just_pressed(KeyCode::KeyC) {
+        tool.connecting = !tool.connecting;
+        tool.connection_from = None;
+        tool.feedback = if tool.connecting {
+            "Connection mode: click the source service".to_owned()
+        } else {
+            format!("Selected {}", service_kind_name(tool.selected))
+        };
+    } else if keys.just_pressed(KeyCode::Escape) && tool.connecting {
+        tool.connecting = false;
+        tool.connection_from = None;
+        tool.feedback = "Connection cancelled".to_owned();
     }
 }
 
@@ -209,7 +266,7 @@ fn update_hovered_tile(
         .and_then(|world| world_to_grid(client.simulation.map().size(), world));
 }
 
-fn place_selected_service(
+fn handle_map_click(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
     mut client: ResMut<ClientSimulation>,
@@ -221,6 +278,28 @@ fn place_selected_service(
     let Some(position) = tool.hovered else {
         return;
     };
+
+    if tool.connecting {
+        match try_connection_click(&mut client.simulation, &mut tool.connection_from, position) {
+            Ok(ConnectionAction::SourceSelected(id)) => {
+                tool.feedback = format!(
+                    "Source {} selected; click a destination",
+                    service_description(&client.simulation, id)
+                );
+            }
+            Ok(ConnectionAction::Connected { from, to }) => {
+                tool.feedback = format!(
+                    "Connected {} → {}",
+                    service_description(&client.simulation, from),
+                    service_description(&client.simulation, to)
+                );
+            }
+            Err(error) => {
+                tool.feedback = format!("Cannot connect: {error}");
+            }
+        }
+        return;
+    }
 
     match build_service(&mut client.simulation, tool.selected, position) {
         Ok(service) => {
@@ -326,7 +405,43 @@ fn draw_map(mut gizmos: Gizmos, client: Res<ClientSimulation>, tool: Res<BuildTo
         draw_arrow(&mut gizmos, start, end, Color::srgb(0.35, 0.75, 0.95));
     }
 
-    if let Some(position) = tool.hovered {
+    if tool.connecting {
+        if let Some(from_id) = tool.connection_from
+            && let Some(from) = simulation.service(from_id)
+        {
+            let start = grid_to_world(map_size, from.position());
+            gizmos.rect_2d(
+                start,
+                Vec2::splat(SERVICE_SIZE + 10.0),
+                Color::srgb(1.0, 0.72, 0.2),
+            );
+            if let Some(position) = tool.hovered {
+                let end = grid_to_world(map_size, position);
+                let color = simulation.map().service_at(position).map_or(
+                    Color::srgb(0.95, 0.3, 0.32),
+                    |to| {
+                        if can_connect(simulation, from_id, to) {
+                            Color::srgb(0.35, 0.95, 0.58)
+                        } else {
+                            Color::srgb(0.95, 0.3, 0.32)
+                        }
+                    },
+                );
+                draw_arrow(&mut gizmos, start, end, color);
+            }
+        } else if let Some(position) = tool.hovered {
+            let color = if simulation.map().service_at(position).is_some() {
+                Color::srgb(1.0, 0.72, 0.2)
+            } else {
+                Color::srgb(0.95, 0.3, 0.32)
+            };
+            gizmos.rect_2d(
+                grid_to_world(map_size, position),
+                Vec2::splat(SERVICE_SIZE + 8.0),
+                color,
+            );
+        }
+    } else if let Some(position) = tool.hovered {
         let color = if can_build(simulation, tool.selected, position) {
             Color::srgb(0.35, 0.95, 0.58)
         } else {
@@ -423,6 +538,54 @@ fn can_build(simulation: &Simulation, kind: ServiceKind, position: GridPosition)
         .is_ok()
 }
 
+fn try_connection_click(
+    simulation: &mut Simulation,
+    connection_from: &mut Option<ServiceId>,
+    position: GridPosition,
+) -> Result<ConnectionAction, ConnectionClickError> {
+    let clicked = simulation
+        .map()
+        .service_at(position)
+        .ok_or(ConnectionClickError::EmptyTile(position))?;
+    let Some(from) = *connection_from else {
+        *connection_from = Some(clicked);
+        return Ok(ConnectionAction::SourceSelected(clicked));
+    };
+
+    let outcome = simulation
+        .apply(GameCommand::ConnectServices { from, to: clicked })
+        .map_err(ConnectionClickError::Command)?;
+    match outcome {
+        CommandOutcome::ServicesConnected { from, to } => {
+            *connection_from = None;
+            Ok(ConnectionAction::Connected { from, to })
+        }
+        CommandOutcome::ServiceBuilt { .. } => {
+            unreachable!("a connection command cannot produce a build outcome")
+        }
+    }
+}
+
+fn can_connect(simulation: &Simulation, from: ServiceId, to: ServiceId) -> bool {
+    let mut preview = simulation.clone();
+    preview
+        .apply(GameCommand::ConnectServices { from, to })
+        .is_ok()
+}
+
+fn service_description(simulation: &Simulation, id: ServiceId) -> String {
+    simulation.service(id).map_or_else(
+        || format!("Service #{}", id.value()),
+        |service| {
+            format!(
+                "{} #{}",
+                service_kind_name(service.kind()),
+                service.id().value()
+            )
+        },
+    )
+}
+
 fn visual_style(kind: ServiceKind) -> VisualStyle {
     match kind {
         ServiceKind::InternetGateway => VisualStyle {
@@ -472,15 +635,25 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
     let received = report.map_or(0, |report| report.received);
     let served = report.map_or(0, |report| report.served);
     let dropped = report.map_or(0, |report| report.dropped);
+    let mode = if tool.connecting {
+        tool.connection_from.map_or_else(
+            || "Mode: Connect (choose source)".to_owned(),
+            |id| format!("Mode: Connect from {}", service_description(simulation, id)),
+        )
+    } else {
+        format!(
+            "Mode: Build {} ({})",
+            service_kind_name(tool.selected),
+            tool.selected.build_cost()
+        )
+    };
     format!(
-        "SERVUS  {status}\n\nTick       {:>6}\nCredits    {:>6}\nDemand     {:>6}\nServed     {:>6}\nDropped    {:>6}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n\nSelected: {} ({})\n{}\n\nSpace: pause / resume",
+        "SERVUS  {status}\n\nTick       {:>6}\nCredits    {:>6}\nDemand     {:>6}\nServed     {:>6}\nDropped    {:>6}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\nC  Connection tool\n\n{mode}\n{}\n\nSpace: pause / resume",
         simulation.tick().number(),
         simulation.budget().credits(),
         received,
         served,
         dropped,
-        service_kind_name(tool.selected),
-        tool.selected.build_cost(),
         tool.feedback,
     )
 }
@@ -621,6 +794,97 @@ mod tests {
     }
 
     #[test]
+    fn connection_tool_selects_a_source_and_creates_a_directed_link() {
+        let map = MapSize::new(3, 3).expect("test map is valid");
+        let mut simulation = Simulation::new(300, 0, map);
+        let gateway = build_service(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            GridPosition::new(0, 0),
+        )
+        .expect("gateway placement is valid");
+        let server = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(1, 0),
+        )
+        .expect("server placement is valid");
+        let mut from = None;
+
+        assert_eq!(
+            try_connection_click(&mut simulation, &mut from, gateway.position()),
+            Ok(ConnectionAction::SourceSelected(gateway.id()))
+        );
+        assert_eq!(from, Some(gateway.id()));
+        assert!(can_connect(&simulation, gateway.id(), server.id()));
+        assert_eq!(
+            try_connection_click(&mut simulation, &mut from, server.position()),
+            Ok(ConnectionAction::Connected {
+                from: gateway.id(),
+                to: server.id(),
+            })
+        );
+        assert_eq!(from, None);
+        assert!(simulation.network().has_link(gateway.id(), server.id()));
+        assert!(!simulation.network().has_link(server.id(), gateway.id()));
+        assert_eq!(simulation.budget().credits(), 140);
+        assert!(!can_connect(&simulation, gateway.id(), server.id()));
+    }
+
+    #[test]
+    fn connection_tool_rejects_empty_tiles_without_losing_its_source() {
+        let map = MapSize::new(3, 3).expect("test map is valid");
+        let mut simulation = Simulation::new(100, 0, map);
+        let gateway = build_service(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            GridPosition::new(0, 0),
+        )
+        .expect("gateway placement is valid");
+        let mut from = Some(gateway.id());
+        let before = simulation.clone();
+        let empty = GridPosition::new(2, 2);
+
+        let error = try_connection_click(&mut simulation, &mut from, empty)
+            .expect_err("an empty tile is not a connection destination");
+        assert_eq!(error, ConnectionClickError::EmptyTile(empty));
+        assert_eq!(error.to_string(), "tile (2, 2) has no service");
+        assert!(std::error::Error::source(&error).is_none());
+        assert_eq!(from, Some(gateway.id()));
+        assert_eq!(simulation, before);
+    }
+
+    #[test]
+    fn failed_connection_preserves_the_source_and_simulation() {
+        let map = MapSize::new(2, 2).expect("test map is valid");
+        let mut simulation = Simulation::new(150, 0, map);
+        let gateway = build_service(
+            &mut simulation,
+            ServiceKind::InternetGateway,
+            GridPosition::new(0, 0),
+        )
+        .expect("gateway placement is valid");
+        let server = build_service(
+            &mut simulation,
+            ServiceKind::ApplicationServer,
+            GridPosition::new(1, 0),
+        )
+        .expect("server placement is valid");
+        let mut from = Some(gateway.id());
+        let before = simulation.clone();
+
+        let error = try_connection_click(&mut simulation, &mut from, server.position())
+            .expect_err("no credits remain for the connection");
+        assert_eq!(
+            error.to_string(),
+            "not enough credits: 10 required, 0 available"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(from, Some(gateway.id()));
+        assert_eq!(simulation, before);
+    }
+
+    #[test]
     fn metrics_include_the_initial_scenario_state() {
         let scenario = create_demo_scenario().expect("demo scenario is valid");
         let client = ClientSimulation {
@@ -632,13 +896,37 @@ mod tests {
         let tool = BuildTool {
             selected: ServiceKind::ApplicationServer,
             hovered: None,
+            connecting: false,
+            connection_from: None,
             feedback: "Ready".to_owned(),
         };
         let text = metrics_text(&client, &tool, "RUNNING");
         assert!(text.contains("Tick            0"));
         assert!(text.contains("Credits        45"));
         assert!(text.contains("Demand          0"));
-        assert!(text.contains("Selected: Application Server (100)"));
+        assert!(text.contains("Mode: Build Application Server (100)"));
         assert!(text.contains("Ready"));
+    }
+
+    #[test]
+    fn metrics_describe_the_selected_connection_source() {
+        let scenario = create_demo_scenario().expect("demo scenario is valid");
+        let source = scenario.simulation.services()[0].id();
+        let client = ClientSimulation {
+            simulation: scenario.simulation,
+            last_report: None,
+            tick_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            paused: false,
+        };
+        let tool = BuildTool {
+            selected: ServiceKind::ApplicationServer,
+            hovered: None,
+            connecting: true,
+            connection_from: Some(source),
+            feedback: "Choose destination".to_owned(),
+        };
+        let text = metrics_text(&client, &tool, "RUNNING");
+        assert!(text.contains("Mode: Connect from Internet Gateway #1"));
+        assert!(text.contains("Choose destination"));
     }
 }

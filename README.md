@@ -34,5 +34,7 @@ In the graphical client:
 
 - select a Gateway, Load Balancer, or Application Server with 1, 2, or 3;
 - click a highlighted free map tile to build;
+- press C, then click a source service and destination service to create a directed connection;
+- press Escape to cancel connection mode;
 - move the camera with WASD or the arrow keys and zoom with the mouse wheel;
 - press Space to pause or resume simulation ticks.
