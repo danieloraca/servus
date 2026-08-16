@@ -10,6 +10,12 @@ const FIREWALL_BUILDING: char = 'f';
 const FIREWALL_OPERATIONAL: char = 'F';
 const LOAD_BALANCER_BUILDING: char = 'l';
 const LOAD_BALANCER_OPERATIONAL: char = 'L';
+const RELATIONAL_DATABASE_BUILDING: char = 'r';
+const RELATIONAL_DATABASE_OPERATIONAL: char = 'R';
+const KEY_VALUE_STORE_BUILDING: char = 'k';
+const KEY_VALUE_STORE_OPERATIONAL: char = 'K';
+const CACHE_BUILDING: char = 'c';
+const CACHE_OPERATIONAL: char = 'C';
 const EMPTY_TILE: char = '.';
 const INVALID_OCCUPANT: char = '?';
 
@@ -54,7 +60,7 @@ pub fn render_simulation(simulation: &Simulation, report: Option<&TickReport>) -
     write_border(&mut output, row_label_width, size.width());
 
     output.push_str(
-        "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, !=disrupted\n",
+        "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, r/R=SQL DB, k/K=Key-Value, c/C=Cache, !=disrupted\n",
     );
     write_network_links(&mut output, simulation);
     if let Some(report) = report {
@@ -100,6 +106,18 @@ fn service_symbol(service: &Service) -> char {
         (ServiceKind::ApplicationServer, ServiceState::Operational) => {
             APPLICATION_SERVER_OPERATIONAL
         }
+        (ServiceKind::RelationalDatabase, ServiceState::UnderConstruction { .. }) => {
+            RELATIONAL_DATABASE_BUILDING
+        }
+        (ServiceKind::RelationalDatabase, ServiceState::Operational) => {
+            RELATIONAL_DATABASE_OPERATIONAL
+        }
+        (ServiceKind::KeyValueStore, ServiceState::UnderConstruction { .. }) => {
+            KEY_VALUE_STORE_BUILDING
+        }
+        (ServiceKind::KeyValueStore, ServiceState::Operational) => KEY_VALUE_STORE_OPERATIONAL,
+        (ServiceKind::Cache, ServiceState::UnderConstruction { .. }) => CACHE_BUILDING,
+        (ServiceKind::Cache, ServiceState::Operational) => CACHE_OPERATIONAL,
     }
 }
 
@@ -196,7 +214,7 @@ mod tests {
                 "0 |...|\n",
                 "1 |...|\n",
                 "  +---+\n",
-                "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, !=disrupted\n",
+                "Legend: g/G=Gateway, f/F=Firewall, l/L=Load Balancer, a/A=App Server, r/R=SQL DB, k/K=Key-Value, c/C=Cache, !=disrupted\n",
                 "Links: none\n",
                 "Traffic: awaiting first tick\n",
             )

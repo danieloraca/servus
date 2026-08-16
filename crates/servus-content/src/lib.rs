@@ -46,6 +46,21 @@ impl ContentCatalog {
                     display_name: "Application Server".to_owned(),
                     description: "Runs application code and handles incoming requests.".to_owned(),
                 },
+                ServiceDefinition {
+                    kind: ServiceKind::RelationalDatabase,
+                    display_name: "Relational Database".to_owned(),
+                    description: "Structured transactional storage, similar to Amazon Aurora, Azure SQL, or Cloud SQL.".to_owned(),
+                },
+                ServiceDefinition {
+                    kind: ServiceKind::KeyValueStore,
+                    display_name: "Key-Value Store".to_owned(),
+                    description: "Highly scalable low-latency records, similar to DynamoDB, Cosmos DB, or Firestore.".to_owned(),
+                },
+                ServiceDefinition {
+                    kind: ServiceKind::Cache,
+                    display_name: "Cache".to_owned(),
+                    description: "Fast temporary data that reduces pressure on databases, similar to ElastiCache, Azure Managed Redis, or Memorystore.".to_owned(),
+                },
             ],
         }
     }

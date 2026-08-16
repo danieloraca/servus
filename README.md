@@ -27,10 +27,22 @@ space-efficient at scale, while multiple Starter instances provide safer redunda
 | Firewall | 200 / 5 | 450 / 8 / 90 | 1,000 / 13 / 180 |
 | Load Balancer | 150 / 4 | 350 / 6 / 60 | 800 / 10 / 120 |
 | Application Server | 100 / 8 | 225 / 13 / 80 | 500 / 22 / 160 |
+| Relational Database | 80 / 14 | 200 / 24 / 150 | 480 / 42 / 300 |
+| Key-Value Store | 160 / 9 | 420 / 15 / 100 | 1,000 / 25 / 210 |
+| Cache | 220 / 6 | 550 / 10 / 55 | 1,300 / 17 / 115 |
+
+The first data-services pack introduces three different scaling shapes. A Relational Database is
+expensive, slow to construct, and occupies 2×2 tiles; a Key-Value Store trades richer structure for
+greater throughput; a Cache is cheap and fast but represents temporary data. These generic names
+map to real-world families such as Aurora/Azure SQL/Cloud SQL, DynamoDB/Cosmos DB/Firestore, and
+ElastiCache/Azure Managed Redis/Memorystore. Their workload-specific persistence and caching effects
+will build on the catalog in a later slice.
 
 The Bevy client starts a playable empty-map scenario and renders infrastructure states, directed
 connections, live simulation metrics, and objectives in a native window. A separate deterministic
 three-tick ASCII scenario remains available for headless debugging.
+The current learning scenario starts with 1,000 credits, enough to experiment with one Starter
+instance of every infrastructure type while retaining some capital for connections and operations.
 Incoming traffic now requires a directed, fully operational path from an Internet Gateway to an
 Application Server. Network links have their own construction cost and are shown in the terminal
 view.
@@ -48,7 +60,8 @@ cargo run -p servus-game --bin servus-ascii
 
 In the graphical client:
 
-- select a Gateway, Load Balancer, Application Server, or Firewall with 1, 2, 3, or 4;
+- select a Gateway, Load Balancer, Application Server, Firewall, Relational Database, Key-Value
+  Store, or Cache with 1 through 7;
 - click a highlighted free map tile to build;
 - press C, then click a source service and destination service to create a directed connection;
 - press X, then click its source and destination to remove a directed connection without a refund;

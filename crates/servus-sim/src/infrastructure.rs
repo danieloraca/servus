@@ -17,12 +17,29 @@ impl ServiceId {
 }
 
 /// Infrastructure currently available to construct.
+#[repr(usize)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ServiceKind {
     InternetGateway,
     Firewall,
     LoadBalancer,
     ApplicationServer,
+    RelationalDatabase,
+    KeyValueStore,
+    Cache,
+}
+
+/// Data-driven balance values for one constructible infrastructure type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceProfile {
+    pub build_cost: u64,
+    pub operating_costs: [u64; 3],
+    pub upgrade_costs: [Option<u64>; 3],
+    pub upgrade_ticks: [Option<u16>; 3],
+    pub capacities: [u64; 3],
+    pub construction_ticks: u16,
+    pub footprint: Footprint,
+    pub serves_requests: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -62,6 +79,10 @@ impl ServiceTier {
             Self::Enterprise => "III",
         }
     }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 impl fmt::Display for ServiceTier {
@@ -71,21 +92,97 @@ impl fmt::Display for ServiceTier {
 }
 
 impl ServiceKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 7] = [
         Self::InternetGateway,
         Self::Firewall,
         Self::LoadBalancer,
         Self::ApplicationServer,
+        Self::RelationalDatabase,
+        Self::KeyValueStore,
+        Self::Cache,
+    ];
+
+    const PROFILES: [ServiceProfile; 7] = [
+        ServiceProfile {
+            build_cost: 50,
+            operating_costs: [2, 3, 5],
+            upgrade_costs: [None, Some(40), Some(80)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [250, 600, 1_500],
+            construction_ticks: 1,
+            footprint: Footprint::new(1, 1),
+            serves_requests: false,
+        },
+        ServiceProfile {
+            build_cost: 125,
+            operating_costs: [5, 8, 13],
+            upgrade_costs: [None, Some(90), Some(180)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [200, 450, 1_000],
+            construction_ticks: 2,
+            footprint: Footprint::new(1, 1),
+            serves_requests: false,
+        },
+        ServiceProfile {
+            build_cost: 75,
+            operating_costs: [4, 6, 10],
+            upgrade_costs: [None, Some(60), Some(120)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [150, 350, 800],
+            construction_ticks: 2,
+            footprint: Footprint::new(1, 1),
+            serves_requests: false,
+        },
+        ServiceProfile {
+            build_cost: 100,
+            operating_costs: [8, 13, 22],
+            upgrade_costs: [None, Some(80), Some(160)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [100, 225, 500],
+            construction_ticks: 3,
+            footprint: Footprint::new(1, 1),
+            serves_requests: true,
+        },
+        ServiceProfile {
+            build_cost: 180,
+            operating_costs: [14, 24, 42],
+            upgrade_costs: [None, Some(150), Some(300)],
+            upgrade_ticks: [None, Some(3), Some(4)],
+            capacities: [80, 200, 480],
+            construction_ticks: 4,
+            footprint: Footprint::new(2, 2),
+            serves_requests: false,
+        },
+        ServiceProfile {
+            build_cost: 120,
+            operating_costs: [9, 15, 25],
+            upgrade_costs: [None, Some(100), Some(210)],
+            upgrade_ticks: [None, Some(2), Some(3)],
+            capacities: [160, 420, 1_000],
+            construction_ticks: 3,
+            footprint: Footprint::new(1, 1),
+            serves_requests: false,
+        },
+        ServiceProfile {
+            build_cost: 70,
+            operating_costs: [6, 10, 17],
+            upgrade_costs: [None, Some(55), Some(115)],
+            upgrade_ticks: [None, Some(1), Some(2)],
+            capacities: [220, 550, 1_300],
+            construction_ticks: 2,
+            footprint: Footprint::new(1, 1),
+            serves_requests: false,
+        },
     ];
 
     #[must_use]
+    pub const fn profile(self) -> &'static ServiceProfile {
+        &Self::PROFILES[self as usize]
+    }
+
+    #[must_use]
     pub const fn build_cost(self) -> u64 {
-        match self {
-            Self::InternetGateway => 50,
-            Self::Firewall => 125,
-            Self::LoadBalancer => 75,
-            Self::ApplicationServer => 100,
-        }
+        self.profile().build_cost
     }
 
     #[must_use]
@@ -95,62 +192,22 @@ impl ServiceKind {
 
     #[must_use]
     pub const fn operating_cost_at(self, tier: ServiceTier) -> u64 {
-        match (self, tier) {
-            (Self::InternetGateway, ServiceTier::Starter) => 2,
-            (Self::InternetGateway, ServiceTier::Scaled) => 3,
-            (Self::InternetGateway, ServiceTier::Enterprise) => 5,
-            (Self::Firewall, ServiceTier::Starter) => 5,
-            (Self::Firewall, ServiceTier::Scaled) => 8,
-            (Self::Firewall, ServiceTier::Enterprise) => 13,
-            (Self::LoadBalancer, ServiceTier::Starter) => 4,
-            (Self::LoadBalancer, ServiceTier::Scaled) => 6,
-            (Self::LoadBalancer, ServiceTier::Enterprise) => 10,
-            (Self::ApplicationServer, ServiceTier::Starter) => 8,
-            (Self::ApplicationServer, ServiceTier::Scaled) => 13,
-            (Self::ApplicationServer, ServiceTier::Enterprise) => 22,
-        }
+        self.profile().operating_costs[tier.index()]
     }
 
     #[must_use]
     pub const fn upgrade_cost(self, target: ServiceTier) -> Option<u64> {
-        match (self, target) {
-            (_, ServiceTier::Starter) => None,
-            (Self::InternetGateway, ServiceTier::Scaled) => Some(40),
-            (Self::InternetGateway, ServiceTier::Enterprise) => Some(80),
-            (Self::Firewall, ServiceTier::Scaled) => Some(90),
-            (Self::Firewall, ServiceTier::Enterprise) => Some(180),
-            (Self::LoadBalancer, ServiceTier::Scaled) => Some(60),
-            (Self::LoadBalancer, ServiceTier::Enterprise) => Some(120),
-            (Self::ApplicationServer, ServiceTier::Scaled) => Some(80),
-            (Self::ApplicationServer, ServiceTier::Enterprise) => Some(160),
-        }
+        self.profile().upgrade_costs[target.index()]
     }
 
     #[must_use]
     pub const fn upgrade_ticks(self, target: ServiceTier) -> Option<u16> {
-        match target {
-            ServiceTier::Starter => None,
-            ServiceTier::Scaled => Some(2),
-            ServiceTier::Enterprise => Some(3),
-        }
+        self.profile().upgrade_ticks[target.index()]
     }
 
     #[must_use]
     pub const fn traffic_capacity_at(self, tier: ServiceTier) -> u64 {
-        match (self, tier) {
-            (Self::InternetGateway, ServiceTier::Starter) => 250,
-            (Self::InternetGateway, ServiceTier::Scaled) => 600,
-            (Self::InternetGateway, ServiceTier::Enterprise) => 1_500,
-            (Self::Firewall, ServiceTier::Starter) => 200,
-            (Self::Firewall, ServiceTier::Scaled) => 450,
-            (Self::Firewall, ServiceTier::Enterprise) => 1_000,
-            (Self::LoadBalancer, ServiceTier::Starter) => 150,
-            (Self::LoadBalancer, ServiceTier::Scaled) => 350,
-            (Self::LoadBalancer, ServiceTier::Enterprise) => 800,
-            (Self::ApplicationServer, ServiceTier::Starter) => 100,
-            (Self::ApplicationServer, ServiceTier::Scaled) => 225,
-            (Self::ApplicationServer, ServiceTier::Enterprise) => 500,
-        }
+        self.profile().capacities[tier.index()]
     }
 
     #[must_use]
@@ -160,30 +217,17 @@ impl ServiceKind {
 
     #[must_use]
     pub const fn serves_requests(self) -> bool {
-        match self {
-            Self::ApplicationServer => true,
-            Self::InternetGateway | Self::Firewall | Self::LoadBalancer => false,
-        }
+        self.profile().serves_requests
     }
 
     #[must_use]
     pub const fn construction_ticks(self) -> u16 {
-        match self {
-            Self::InternetGateway => 1,
-            Self::Firewall => 2,
-            Self::LoadBalancer => 2,
-            Self::ApplicationServer => 3,
-        }
+        self.profile().construction_ticks
     }
 
     #[must_use]
     pub const fn footprint(self) -> Footprint {
-        match self {
-            Self::InternetGateway => Footprint::new(1, 1),
-            Self::Firewall => Footprint::new(1, 1),
-            Self::LoadBalancer => Footprint::new(1, 1),
-            Self::ApplicationServer => Footprint::new(1, 1),
-        }
+        self.profile().footprint
     }
 }
 
@@ -460,8 +504,31 @@ mod tests {
                 ServiceKind::InternetGateway,
                 ServiceKind::Firewall,
                 ServiceKind::LoadBalancer,
-                ServiceKind::ApplicationServer
+                ServiceKind::ApplicationServer,
+                ServiceKind::RelationalDatabase,
+                ServiceKind::KeyValueStore,
+                ServiceKind::Cache,
             ]
+        );
+    }
+
+    #[test]
+    fn data_services_have_distinct_strategic_profiles() {
+        let relational = ServiceKind::RelationalDatabase;
+        let key_value = ServiceKind::KeyValueStore;
+        let cache = ServiceKind::Cache;
+
+        assert!(relational.build_cost() > key_value.build_cost());
+        assert!(key_value.build_cost() > cache.build_cost());
+        let relational_tiles = relational.footprint().width() * relational.footprint().height();
+        let key_value_tiles = key_value.footprint().width() * key_value.footprint().height();
+        assert!(relational_tiles > key_value_tiles);
+        assert!(cache.traffic_capacity() > key_value.traffic_capacity());
+        assert!(key_value.traffic_capacity() > relational.traffic_capacity());
+        assert!(
+            ServiceKind::ALL
+                .iter()
+                .all(|kind| kind.profile().construction_ticks > 0)
         );
     }
 

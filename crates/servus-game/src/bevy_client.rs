@@ -26,6 +26,15 @@ const MAX_DEMAND: u64 = 1_000;
 const SERVED_OBJECTIVE: u64 = 500;
 const NOTIFICATION_SECONDS: f32 = 3.0;
 const OBJECTIVE_COUNT: usize = 9;
+const BUILD_PALETTE: [(u8, ServiceKind); 7] = [
+    (1, ServiceKind::InternetGateway),
+    (2, ServiceKind::LoadBalancer),
+    (3, ServiceKind::ApplicationServer),
+    (4, ServiceKind::Firewall),
+    (5, ServiceKind::RelationalDatabase),
+    (6, ServiceKind::KeyValueStore),
+    (7, ServiceKind::Cache),
+];
 
 #[derive(Resource)]
 struct ClientSimulation {
@@ -72,6 +81,12 @@ impl SoundQueue {
 
 #[derive(Component)]
 struct ServiceVisual(ServiceId);
+
+#[derive(Component)]
+struct BuildPreviewVisual;
+
+#[derive(Component)]
+struct BuildPreviewLabel;
 
 #[derive(Component)]
 struct MetricsText;
@@ -206,7 +221,7 @@ pub fn run_bevy_client() {
             network_mode: None,
             connection_from: None,
             inspected: None,
-            feedback: "Select with 1–4, then click a free tile".to_owned(),
+            feedback: "Select with 1–7, then click a free tile".to_owned(),
         })
         .insert_resource(AudioSettings::default())
         .insert_resource(SoundQueue::default())
@@ -245,6 +260,7 @@ pub fn run_bevy_client() {
             PostUpdate,
             (
                 update_hovered_tile,
+                update_build_preview,
                 inspect_service,
                 handle_map_click,
                 update_objective_progress,
@@ -259,6 +275,23 @@ pub fn run_bevy_client() {
 
 fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     commands.spawn(Camera2d);
+
+    commands
+        .spawn((
+            Sprite::from_color(Color::NONE, Vec2::splat(SERVICE_SIZE)),
+            Transform::from_xyz(0.0, 0.0, 0.8),
+            Visibility::Hidden,
+            BuildPreviewVisual,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text2d::new(""),
+                TextFont::from_font_size(16.0),
+                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.82)),
+                Transform::from_xyz(0.0, 0.0, 0.1),
+                BuildPreviewLabel,
+            ));
+        });
 
     let map_size = client.simulation.map().size();
     for service in client.simulation.services() {
@@ -282,7 +315,7 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
     ));
 
     commands.spawn((
-        Text::new("WASD move   1–4 build   C link   X unlink   U upgrade   M sound   [ ] volume"),
+        Text::new("WASD move   1–7 build   C link   X unlink   U upgrade   M sound   [ ] volume"),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.58, 0.68, 0.78)),
         Node {
@@ -327,13 +360,11 @@ fn setup(mut commands: Commands, client: Res<ClientSimulation>) {
 
 fn spawn_service_visual(commands: &mut Commands, map_size: MapSize, service: Service) {
     let style = visual_style(service.kind());
-    let world_position = grid_to_world(map_size, service.position());
+    let world_position = service_world_position(map_size, &service);
+    let visual_size = service_visual_size(service.kind());
     commands
         .spawn((
-            Sprite::from_color(
-                color_for_state(style, service.state(), 0.0),
-                Vec2::splat(SERVICE_SIZE),
-            ),
+            Sprite::from_color(color_for_state(style, service.state(), 0.0), visual_size),
             Transform::from_xyz(world_position.x, world_position.y, 1.0),
             ServiceVisual(service.id()),
         ))
@@ -444,6 +475,12 @@ fn select_building(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<BuildTool>)
         Some(ServiceKind::ApplicationServer)
     } else if keys.just_pressed(KeyCode::Digit4) || keys.just_pressed(KeyCode::Numpad4) {
         Some(ServiceKind::Firewall)
+    } else if keys.just_pressed(KeyCode::Digit5) || keys.just_pressed(KeyCode::Numpad5) {
+        Some(ServiceKind::RelationalDatabase)
+    } else if keys.just_pressed(KeyCode::Digit6) || keys.just_pressed(KeyCode::Numpad6) {
+        Some(ServiceKind::KeyValueStore)
+    } else if keys.just_pressed(KeyCode::Digit7) || keys.just_pressed(KeyCode::Numpad7) {
+        Some(ServiceKind::Cache)
     } else {
         None
     };
@@ -572,6 +609,29 @@ fn update_hovered_tile(
         .cursor_position()
         .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
         .and_then(|world| world_to_grid(client.simulation.map().size(), world));
+}
+
+fn update_build_preview(
+    client: Res<ClientSimulation>,
+    tool: Res<BuildTool>,
+    mut preview: Single<(&mut Sprite, &mut Transform, &mut Visibility), With<BuildPreviewVisual>>,
+    mut label: Single<&mut Text2d, With<BuildPreviewLabel>>,
+) {
+    let (sprite, transform, visibility) = &mut *preview;
+    let Some(position) = tool.hovered.filter(|_| tool.network_mode.is_none()) else {
+        **visibility = Visibility::Hidden;
+        return;
+    };
+
+    let kind = tool.selected;
+    let valid = can_build(&client.simulation, kind, position);
+    let style = visual_style(kind);
+    sprite.color = build_preview_color(style, valid);
+    sprite.custom_size = Some(service_visual_size(kind));
+    transform.translation =
+        footprint_world_position(client.simulation.map().size(), position, kind).extend(0.8);
+    **label = Text2d::new(style.abbreviation);
+    **visibility = Visibility::Visible;
 }
 
 fn inspect_service(
@@ -808,11 +868,12 @@ fn draw_map(
     }
 
     for service in simulation.services() {
-        let center = grid_to_world(map_size, service.position());
+        let center = service_world_position(map_size, service);
+        let size = service_visual_size(service.kind());
         for ring in 0..tier_ring_count(service.tier()) {
-            gizmos.circle_2d(
+            gizmos.rect_2d(
                 center,
-                SERVICE_SIZE * 0.58 + ring as f32 * 5.0,
+                size + Vec2::splat(10.0 + ring as f32 * 8.0),
                 Color::srgb(0.35, 0.92, 1.0),
             );
         }
@@ -823,8 +884,8 @@ fn draw_map(
         else {
             continue;
         };
-        let start = grid_to_world(map_size, from.position());
-        let end = grid_to_world(map_size, to.position());
+        let start = service_world_position(map_size, from);
+        let end = service_world_position(map_size, to);
         let selected_for_removal = tool.network_mode == Some(NetworkMode::Disconnect)
             && tool.connection_from == Some(link.from);
         let color = if selected_for_removal {
@@ -843,8 +904,8 @@ fn draw_map(
             ) else {
                 continue;
             };
-            let start = grid_to_world(map_size, from.position());
-            let end = grid_to_world(map_size, to.position());
+            let start = service_world_position(map_size, from);
+            let end = service_world_position(map_size, to);
             for marker in traffic_markers(start, end, traffic.requests, time.elapsed_secs()) {
                 gizmos.circle_2d(marker, 4.5, Color::srgb(1.0, 0.84, 0.28));
             }
@@ -855,8 +916,8 @@ fn draw_map(
         && let Some(service) = simulation.service(id)
     {
         gizmos.rect_2d(
-            grid_to_world(map_size, service.position()),
-            Vec2::splat(SERVICE_SIZE + 16.0),
+            service_world_position(map_size, service),
+            service_visual_size(service.kind()) + Vec2::splat(16.0),
             Color::srgb(0.3, 0.95, 1.0),
         );
     }
@@ -865,14 +926,21 @@ fn draw_map(
         if let Some(from_id) = tool.connection_from
             && let Some(from) = simulation.service(from_id)
         {
-            let start = grid_to_world(map_size, from.position());
+            let start = service_world_position(map_size, from);
             gizmos.rect_2d(
                 start,
-                Vec2::splat(SERVICE_SIZE + 10.0),
+                service_visual_size(from.kind()) + Vec2::splat(10.0),
                 Color::srgb(1.0, 0.72, 0.2),
             );
             if let Some(position) = tool.hovered {
-                let end = grid_to_world(map_size, position);
+                let end = simulation
+                    .map()
+                    .service_at(position)
+                    .and_then(|id| simulation.service(id))
+                    .map_or_else(
+                        || grid_to_world(map_size, position),
+                        |service| service_world_position(map_size, service),
+                    );
                 let valid = simulation
                     .map()
                     .service_at(position)
@@ -909,8 +977,8 @@ fn draw_map(
             Color::srgb(0.95, 0.3, 0.32)
         };
         gizmos.rect_2d(
-            grid_to_world(map_size, position),
-            Vec2::splat(SERVICE_SIZE + 8.0),
+            footprint_world_position(map_size, position, tool.selected),
+            service_visual_size(tool.selected) + Vec2::splat(8.0),
             color,
         );
     }
@@ -968,6 +1036,27 @@ fn grid_to_world(map_size: MapSize, position: GridPosition) -> Vec2 {
         (f32::from(position.x) - center_x) * TILE_SIZE + MAP_OFFSET_X,
         (center_y - f32::from(position.y)) * TILE_SIZE,
     )
+}
+
+fn service_visual_size(kind: ServiceKind) -> Vec2 {
+    let footprint = kind.footprint();
+    Vec2::new(
+        f32::from(footprint.width()) * TILE_SIZE - (TILE_SIZE - SERVICE_SIZE),
+        f32::from(footprint.height()) * TILE_SIZE - (TILE_SIZE - SERVICE_SIZE),
+    )
+}
+
+fn footprint_world_position(map_size: MapSize, position: GridPosition, kind: ServiceKind) -> Vec2 {
+    let footprint = kind.footprint();
+    grid_to_world(map_size, position)
+        + Vec2::new(
+            f32::from(footprint.width() - 1) * TILE_SIZE / 2.0,
+            -f32::from(footprint.height() - 1) * TILE_SIZE / 2.0,
+        )
+}
+
+fn service_world_position(map_size: MapSize, service: &Service) -> Vec2 {
+    footprint_world_position(map_size, service.position(), service.kind())
 }
 
 fn world_to_grid(map_size: MapSize, world: Vec2) -> Option<GridPosition> {
@@ -1415,7 +1504,7 @@ fn reset_scenario(
     tool.network_mode = None;
     tool.connection_from = None;
     tool.inspected = None;
-    tool.feedback = "Scenario restarted; select with 1–4".to_owned();
+    tool.feedback = "Scenario restarted; select with 1–7".to_owned();
 
     *progress = GameProgress::new();
     progress.notification = Some("Scenario restarted".to_owned());
@@ -1439,6 +1528,18 @@ fn visual_style(kind: ServiceKind) -> VisualStyle {
             abbreviation: "APP",
             color: [0.2, 0.78, 0.5],
         },
+        ServiceKind::RelationalDatabase => VisualStyle {
+            abbreviation: "SQL",
+            color: [0.18, 0.48, 0.9],
+        },
+        ServiceKind::KeyValueStore => VisualStyle {
+            abbreviation: "KV",
+            color: [0.9, 0.3, 0.58],
+        },
+        ServiceKind::Cache => VisualStyle {
+            abbreviation: "CCH",
+            color: [0.95, 0.76, 0.18],
+        },
     }
 }
 
@@ -1448,6 +1549,18 @@ fn service_kind_name(kind: ServiceKind) -> &'static str {
         ServiceKind::Firewall => "Firewall",
         ServiceKind::LoadBalancer => "Load Balancer",
         ServiceKind::ApplicationServer => "Application Server",
+        ServiceKind::RelationalDatabase => "Relational Database",
+        ServiceKind::KeyValueStore => "Key-Value Store",
+        ServiceKind::Cache => "Cache",
+    }
+}
+
+fn build_preview_color(style: VisualStyle, valid: bool) -> Color {
+    if valid {
+        let [red, green, blue] = style.color;
+        Color::srgba(red, green, blue, 0.42)
+    } else {
+        Color::srgba(0.95, 0.12, 0.15, 0.38)
     }
 }
 
@@ -1541,8 +1654,9 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         .and_then(|id| inspection_text(client, id))
         .unwrap_or_else(|| "INSPECT\nRight-click a service".to_owned());
     let objectives = objectives_text(client);
+    let build_menu = build_menu_text();
     format!(
-        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n1  Gateway       50\n2  Load Balancer 75\n3  App Server   100\n4  Firewall     125\nC  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
+        "SERVUS  {status}\n\nTick         {:>6}\nCredits      {:>6}\nDemand       {:>6}\nServed       {:>6}\nDropped      {:>6}\nTotal served {:>6}\nAttacks held {:>6}\nFailovers    {:>6}\nOutage losses{:>6}\nThreat in    {:>6}\n\n{objectives}\n\nBUILD\n{build_menu}C  Connection tool\nX  Disconnect tool\nU  Upgrade inspected\n- / +  Demand\nM / [ ]  Sound\n\n{mode}\n{}\n\n{inspection}\n\nSpace: pause / resume\nR: restart scenario",
         simulation.tick().number(),
         simulation.budget().credits(),
         demand,
@@ -1555,6 +1669,19 @@ fn metrics_text(client: &ClientSimulation, tool: &BuildTool, status: &str) -> St
         ticks_until_attack(simulation.tick().number()),
         tool.feedback,
     )
+}
+
+fn build_menu_text() -> String {
+    BUILD_PALETTE
+        .iter()
+        .map(|(key, kind)| {
+            format!(
+                "{key}  {:<20} {:>3}\n",
+                service_kind_name(*kind),
+                kind.build_cost()
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1590,6 +1717,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn multi_tile_services_are_centered_and_fill_their_reserved_footprint() {
+        let map = MapSize::new(8, 8).expect("valid map");
+        let position = GridPosition::new(2, 3);
+        let top_left = grid_to_world(map, position);
+        let center = footprint_world_position(map, position, ServiceKind::RelationalDatabase);
+        let size = service_visual_size(ServiceKind::RelationalDatabase);
+
+        assert_eq!(
+            center,
+            top_left + Vec2::new(TILE_SIZE / 2.0, -TILE_SIZE / 2.0)
+        );
+        assert_eq!(
+            size,
+            Vec2::splat(TILE_SIZE * 2.0 - (TILE_SIZE - SERVICE_SIZE))
+        );
+        assert_eq!(
+            service_visual_size(ServiceKind::Cache),
+            Vec2::splat(SERVICE_SIZE)
+        );
     }
 
     #[test]
@@ -1690,18 +1839,28 @@ mod tests {
 
     #[test]
     fn every_service_kind_has_a_distinct_visual_identity() {
-        let gateway = visual_style(ServiceKind::InternetGateway);
-        let firewall = visual_style(ServiceKind::Firewall);
-        let load_balancer = visual_style(ServiceKind::LoadBalancer);
-        let server = visual_style(ServiceKind::ApplicationServer);
-        assert_eq!(gateway.abbreviation, "GW");
-        assert_eq!(firewall.abbreviation, "FW");
-        assert_eq!(load_balancer.abbreviation, "LB");
-        assert_eq!(server.abbreviation, "APP");
-        assert_ne!(gateway.color, load_balancer.color);
-        assert_ne!(gateway.color, firewall.color);
-        assert_ne!(firewall.color, load_balancer.color);
-        assert_ne!(load_balancer.color, server.color);
+        let styles = ServiceKind::ALL.map(visual_style);
+        for (index, style) in styles.iter().enumerate() {
+            assert!(!style.abbreviation.is_empty());
+            for other in styles.iter().skip(index + 1) {
+                assert_ne!(style.abbreviation, other.abbreviation);
+                assert_ne!(style.color, other.color);
+            }
+        }
+    }
+
+    #[test]
+    fn build_preview_uses_the_selected_type_color_and_marks_invalid_placement() {
+        let gateway = build_preview_color(visual_style(ServiceKind::InternetGateway), true);
+        let load_balancer = build_preview_color(visual_style(ServiceKind::LoadBalancer), true);
+        let invalid_gateway =
+            build_preview_color(visual_style(ServiceKind::InternetGateway), false);
+        let invalid_load_balancer =
+            build_preview_color(visual_style(ServiceKind::LoadBalancer), false);
+
+        assert_ne!(gateway, load_balancer);
+        assert_eq!(invalid_gateway, invalid_load_balancer);
+        assert_ne!(gateway, invalid_gateway);
     }
 
     #[test]
@@ -2290,7 +2449,10 @@ mod tests {
         reset_scenario(&mut client, &mut tool, &mut progress);
 
         assert!(client.simulation.services().is_empty());
-        assert_eq!(client.simulation.budget().credits(), 500);
+        assert_eq!(
+            client.simulation.budget().credits(),
+            crate::NEW_GAME_STARTING_CREDITS
+        );
         assert_eq!(client.simulation.traffic().requests_per_tick(), 100);
         assert_eq!(client.last_report, None);
         assert!(!client.paused);

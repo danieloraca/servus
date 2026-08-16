@@ -19,7 +19,7 @@ pub const DEMO_GATEWAY_POSITION: GridPosition = GridPosition::new(1, 4);
 pub const DEMO_LOAD_BALANCER_POSITION: GridPosition = GridPosition::new(3, 4);
 pub const DEMO_SERVER_ONE_POSITION: GridPosition = GridPosition::new(5, 3);
 pub const DEMO_SERVER_TWO_POSITION: GridPosition = GridPosition::new(5, 5);
-pub const NEW_GAME_STARTING_CREDITS: u64 = 500;
+pub const NEW_GAME_STARTING_CREDITS: u64 = 1_000;
 pub const NEW_GAME_REQUESTS_PER_TICK: u64 = 100;
 pub const NEW_GAME_MAP_WIDTH: u16 = 8;
 pub const NEW_GAME_MAP_HEIGHT: u16 = 8;
@@ -247,6 +247,28 @@ mod tests {
         );
         assert!(simulation.services().is_empty());
         assert!(simulation.network().links().is_empty());
+    }
+
+    #[test]
+    fn new_game_can_build_one_of_every_infrastructure_type() {
+        let mut simulation = create_new_game().expect("new-game map dimensions are valid");
+        let placements = [
+            (ServiceKind::InternetGateway, GridPosition::new(0, 0)),
+            (ServiceKind::LoadBalancer, GridPosition::new(1, 0)),
+            (ServiceKind::ApplicationServer, GridPosition::new(2, 0)),
+            (ServiceKind::Firewall, GridPosition::new(3, 0)),
+            (ServiceKind::RelationalDatabase, GridPosition::new(4, 0)),
+            (ServiceKind::KeyValueStore, GridPosition::new(6, 0)),
+            (ServiceKind::Cache, GridPosition::new(7, 0)),
+        ];
+
+        for (kind, position) in placements {
+            build_service(&mut simulation, kind, position)
+                .unwrap_or_else(|error| panic!("failed to build {kind:?}: {error}"));
+        }
+
+        assert_eq!(simulation.services().len(), ServiceKind::ALL.len());
+        assert_eq!(simulation.budget().credits(), 280);
     }
 
     #[test]
