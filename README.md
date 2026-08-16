@@ -8,6 +8,9 @@ The repository is a Cargo workspace split into:
 - `servus-content`: game definitions and validation;
 - `servus-game`: the executable and, later, engine integration.
 
+The current vertical slice supports deterministic ticks, positional infrastructure construction,
+map bounds and occupancy, traffic capacity, dropped requests, and revenue.
+
 ## Development
 
 ```sh

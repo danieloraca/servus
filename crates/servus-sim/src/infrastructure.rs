@@ -1,3 +1,5 @@
+use crate::{Footprint, GridPosition};
+
 /// The stable identity of a constructed service.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ServiceId(u64);
@@ -35,17 +37,25 @@ impl ServiceKind {
             Self::ApplicationServer => 100,
         }
     }
+
+    #[must_use]
+    pub const fn footprint(self) -> Footprint {
+        match self {
+            Self::ApplicationServer => Footprint::new(1, 1),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Service {
     id: ServiceId,
     kind: ServiceKind,
+    position: GridPosition,
 }
 
 impl Service {
-    pub(crate) const fn new(id: ServiceId, kind: ServiceKind) -> Self {
-        Self { id, kind }
+    pub(crate) const fn new(id: ServiceId, kind: ServiceKind, position: GridPosition) -> Self {
+        Self { id, kind, position }
     }
 
     #[must_use]
@@ -56,6 +66,11 @@ impl Service {
     #[must_use]
     pub const fn kind(self) -> ServiceKind {
         self.kind
+    }
+
+    #[must_use]
+    pub const fn position(self) -> GridPosition {
+        self.position
     }
 
     #[must_use]
@@ -77,14 +92,22 @@ mod tests {
 
     #[test]
     fn a_service_exposes_its_identity_kind_and_capacity() {
-        let service = Service::new(ServiceId::new(7), ServiceKind::ApplicationServer);
+        let position = GridPosition::new(3, 4);
+        let service = Service::new(ServiceId::new(7), ServiceKind::ApplicationServer, position);
         assert_eq!(service.id().value(), 7);
         assert_eq!(service.kind(), ServiceKind::ApplicationServer);
+        assert_eq!(service.position(), position);
         assert_eq!(service.request_capacity(), 100);
     }
 
     #[test]
     fn all_lists_every_constructible_service_kind() {
         assert_eq!(ServiceKind::ALL, [ServiceKind::ApplicationServer]);
+    }
+
+    #[test]
+    fn application_server_occupies_one_tile() {
+        assert_eq!(ServiceKind::ApplicationServer.footprint().width(), 1);
+        assert_eq!(ServiceKind::ApplicationServer.footprint().height(), 1);
     }
 }

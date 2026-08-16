@@ -1,6 +1,6 @@
 use crate::{
-    Budget, CommandError, CommandOutcome, GameCommand, Service, ServiceId, Tick, TickReport,
-    Traffic,
+    Budget, CommandError, CommandOutcome, GameCommand, GridMap, MapSize, Service, ServiceId, Tick,
+    TickReport, Traffic,
 };
 
 const REVENUE_PER_SERVED_REQUEST: u64 = 1;
@@ -11,17 +11,19 @@ pub struct Simulation {
     tick: Tick,
     budget: Budget,
     traffic: Traffic,
+    map: GridMap,
     services: Vec<Service>,
     next_service_id: u64,
 }
 
 impl Simulation {
     #[must_use]
-    pub fn new(starting_credits: u64, requests_per_tick: u64) -> Self {
+    pub fn new(starting_credits: u64, requests_per_tick: u64, map_size: MapSize) -> Self {
         Self {
             tick: Tick::default(),
             budget: Budget::new(starting_credits),
             traffic: Traffic::new(requests_per_tick),
+            map: GridMap::new(map_size),
             services: Vec::new(),
             next_service_id: 1,
         }
@@ -42,6 +44,11 @@ impl Simulation {
         self.traffic
     }
 
+    #[must_use]
+    pub const fn map(&self) -> &GridMap {
+        &self.map
+    }
+
     pub fn set_requests_per_tick(&mut self, requests_per_tick: u64) {
         self.traffic.set_requests_per_tick(requests_per_tick);
     }
@@ -53,16 +60,21 @@ impl Simulation {
 
     pub fn apply(&mut self, command: GameCommand) -> Result<CommandOutcome, CommandError> {
         match command {
-            GameCommand::BuildService { kind } => {
+            GameCommand::BuildService { kind, position } => {
+                let footprint = kind.footprint();
+                self.map
+                    .validate_placement(position, footprint)
+                    .map_err(CommandError::InvalidPlacement)?;
                 self.budget
                     .spend(kind.build_cost())
                     .map_err(CommandError::InsufficientBudget)?;
 
                 let id = ServiceId::new(self.next_service_id);
                 self.next_service_id = self.next_service_id.saturating_add(1);
-                self.services.push(Service::new(id, kind));
+                self.map.occupy(position, footprint, id);
+                self.services.push(Service::new(id, kind, position));
 
-                Ok(CommandOutcome::ServiceBuilt { id, kind })
+                Ok(CommandOutcome::ServiceBuilt { id, kind, position })
             }
         }
     }
@@ -91,33 +103,48 @@ impl Simulation {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BudgetError, ServiceKind};
+    use crate::{BudgetError, GridPosition, PlacementError, ServiceKind};
 
     use super::*;
 
+    fn map_size() -> MapSize {
+        MapSize::new(4, 4).expect("test map dimensions are valid")
+    }
+
+    fn position(x: u16, y: u16) -> GridPosition {
+        GridPosition::new(x, y)
+    }
+
     #[test]
     fn building_a_service_spends_credits_and_adds_capacity() {
-        let mut simulation = Simulation::new(250, 0);
+        let mut simulation = Simulation::new(250, 0, map_size());
         let outcome = simulation.apply(GameCommand::BuildService {
             kind: ServiceKind::ApplicationServer,
+            position: position(2, 3),
         });
         assert_eq!(
             outcome,
             Ok(CommandOutcome::ServiceBuilt {
                 id: ServiceId::new(1),
                 kind: ServiceKind::ApplicationServer,
+                position: position(2, 3),
             })
         );
         assert_eq!(simulation.budget().credits(), 150);
         assert_eq!(simulation.services().len(), 1);
+        assert_eq!(
+            simulation.map().service_at(position(2, 3)),
+            Some(ServiceId::new(1))
+        );
     }
 
     #[test]
     fn failed_construction_does_not_mutate_the_simulation() {
-        let mut simulation = Simulation::new(50, 0);
+        let mut simulation = Simulation::new(50, 0, map_size());
         let before = simulation.clone();
         let result = simulation.apply(GameCommand::BuildService {
             kind: ServiceKind::ApplicationServer,
+            position: position(0, 0),
         });
         assert_eq!(
             result,
@@ -131,18 +158,21 @@ mod tests {
 
     #[test]
     fn constructed_services_receive_stable_unique_ids() {
-        let mut simulation = Simulation::new(200, 0);
+        let mut simulation = Simulation::new(200, 0, map_size());
         let first = simulation.apply(GameCommand::BuildService {
             kind: ServiceKind::ApplicationServer,
+            position: position(0, 0),
         });
         let second = simulation.apply(GameCommand::BuildService {
             kind: ServiceKind::ApplicationServer,
+            position: position(1, 0),
         });
         assert_eq!(
             first,
             Ok(CommandOutcome::ServiceBuilt {
                 id: ServiceId::new(1),
                 kind: ServiceKind::ApplicationServer,
+                position: position(0, 0),
             })
         );
         assert_eq!(
@@ -150,16 +180,18 @@ mod tests {
             Ok(CommandOutcome::ServiceBuilt {
                 id: ServiceId::new(2),
                 kind: ServiceKind::ApplicationServer,
+                position: position(1, 0),
             })
         );
     }
 
     #[test]
     fn a_tick_serves_requests_up_to_available_capacity() {
-        let mut simulation = Simulation::new(100, 140);
+        let mut simulation = Simulation::new(100, 140, map_size());
         simulation
             .apply(GameCommand::BuildService {
                 kind: ServiceKind::ApplicationServer,
+                position: position(0, 0),
             })
             .expect("the test has enough construction credits");
         let report = simulation.advance();
@@ -173,7 +205,7 @@ mod tests {
 
     #[test]
     fn requests_are_dropped_when_there_is_no_infrastructure() {
-        let mut simulation = Simulation::new(0, 30);
+        let mut simulation = Simulation::new(0, 30, map_size());
         let report = simulation.advance();
         assert_eq!(report.served, 0);
         assert_eq!(report.dropped, 30);
@@ -182,15 +214,63 @@ mod tests {
 
     #[test]
     fn demand_can_change_between_ticks() {
-        let mut simulation = Simulation::new(100, 20);
+        let mut simulation = Simulation::new(100, 20, map_size());
         simulation
             .apply(GameCommand::BuildService {
                 kind: ServiceKind::ApplicationServer,
+                position: position(0, 0),
             })
             .expect("the test has enough construction credits");
         assert_eq!(simulation.advance().received, 20);
         simulation.set_requests_per_tick(75);
         assert_eq!(simulation.traffic().requests_per_tick(), 75);
         assert_eq!(simulation.advance().received, 75);
+    }
+
+    #[test]
+    fn construction_outside_the_map_is_rejected_without_mutation() {
+        let mut simulation = Simulation::new(200, 0, map_size());
+        let before = simulation.clone();
+        let result = simulation.apply(GameCommand::BuildService {
+            kind: ServiceKind::ApplicationServer,
+            position: position(4, 0),
+        });
+        assert_eq!(
+            result,
+            Err(CommandError::InvalidPlacement(
+                PlacementError::OutOfBounds {
+                    position: position(4, 0),
+                    footprint: ServiceKind::ApplicationServer.footprint(),
+                    map_size: map_size(),
+                }
+            ))
+        );
+        assert_eq!(simulation, before);
+    }
+
+    #[test]
+    fn construction_cannot_overlap_an_existing_service() {
+        let mut simulation = Simulation::new(200, 0, map_size());
+        simulation
+            .apply(GameCommand::BuildService {
+                kind: ServiceKind::ApplicationServer,
+                position: position(1, 2),
+            })
+            .expect("the first placement is valid");
+        let before_failed_command = simulation.clone();
+
+        let result = simulation.apply(GameCommand::BuildService {
+            kind: ServiceKind::ApplicationServer,
+            position: position(1, 2),
+        });
+
+        assert_eq!(
+            result,
+            Err(CommandError::InvalidPlacement(PlacementError::Occupied {
+                position: position(1, 2),
+                service_id: ServiceId::new(1),
+            }))
+        );
+        assert_eq!(simulation, before_failed_command);
     }
 }

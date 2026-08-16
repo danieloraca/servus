@@ -14,3 +14,10 @@ saves, replays, balancing tools, and a possible authoritative multiplayer server
 
 Game content depends on public simulation types and validates definitions before they reach the
 simulation. Rendering, input, audio, and engine integration belong only in `servus-game`.
+
+## Spatial simulation
+
+The simulation owns a bounded tile grid. Infrastructure construction commands include a grid
+position, and the simulation validates the service footprint against map bounds and existing
+occupancy before spending credits. A rejected command leaves the complete simulation state
+unchanged, which keeps command replay and future multiplayer synchronization predictable.
