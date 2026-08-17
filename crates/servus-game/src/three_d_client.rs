@@ -27,12 +27,14 @@ struct SelectedFloor(Option<ServiceId>);
 struct PrototypeBuildTool {
     action: PrototypeBuildAction,
     feedback: String,
+    connection_from: Option<ServiceId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PrototypeBuildAction {
     Foundation(FoundationKind),
     Service(ServiceKind),
+    Connect,
 }
 
 #[derive(Component)]
@@ -76,6 +78,7 @@ pub fn run_3d_client() {
         .insert_resource(PrototypeBuildTool {
             action: PrototypeBuildAction::Foundation(FoundationKind::SmallLot),
             feedback: "Choose a lot, then click the city grid".to_owned(),
+            connection_from: None,
         })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -95,6 +98,7 @@ pub fn run_3d_client() {
                 place_from_build_tool,
                 sync_3d_scene,
                 select_floor,
+                draw_network_overlay,
                 upgrade_selected_floor,
                 advance_prototype,
                 update_floor_appearance,
@@ -245,6 +249,7 @@ fn spawn_build_palette(commands: &mut Commands) {
             "SQL  180c",
             PrototypeBuildAction::Service(ServiceKind::RelationalDatabase),
         ),
+        ("CONNECT\nNetwork overlay", PrototypeBuildAction::Connect),
     ];
     commands
         .spawn((
@@ -292,7 +297,7 @@ fn spawn_build_palette(commands: &mut Commands) {
                     }
                 });
             panel.spawn((
-                Text::new("SERVICES — select, then click a building"),
+                Text::new("SERVICES — install floors, or open the connection overlay"),
                 TextFont::from_font_size(12.0),
                 TextColor(Color::srgb(0.7, 0.82, 0.92)),
             ));
@@ -375,6 +380,7 @@ fn handle_build_palette(
 
 fn select_build_action(tool: &mut PrototypeBuildTool, action: PrototypeBuildAction) {
     tool.action = action;
+    tool.connection_from = None;
     tool.feedback = match action {
         PrototypeBuildAction::Foundation(foundation) => format!(
             "{} selected — click an empty grid area",
@@ -382,6 +388,9 @@ fn select_build_action(tool: &mut PrototypeBuildTool, action: PrototypeBuildActi
         ),
         PrototypeBuildAction::Service(kind) => {
             format!("{} selected — click a building", kind_name(kind))
+        }
+        PrototypeBuildAction::Connect => {
+            "NETWORK OVERLAY — click a source floor, then a destination floor".to_owned()
         }
     };
 }
@@ -460,12 +469,14 @@ fn update_foundation_preview(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn place_from_build_tool(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera3d>>,
     buttons: Query<&Interaction, With<PrototypeBuildButton>>,
     solutions: Query<&Solution3d>,
+    floors: Query<&Floor3d>,
     mut prototype: ResMut<PrototypeSimulation>,
     mut tool: ResMut<PrototypeBuildTool>,
 ) {
@@ -532,6 +543,49 @@ fn place_from_build_tool(
                 }
                 Ok(_) => unreachable!("install command returns an installation outcome"),
                 Err(error) => tool.feedback = format!("Cannot install service: {error}"),
+            }
+        }
+        PrototypeBuildAction::Connect => {
+            let target = floors
+                .iter()
+                .filter_map(|floor| {
+                    ray_aabb_distance(ray.origin, *ray.direction, floor.bounds)
+                        .map(|distance| (distance, floor.service))
+                })
+                .min_by(|left, right| left.0.total_cmp(&right.0))
+                .map(|(_, service)| service);
+            let Some(target) = target else {
+                tool.feedback = "Network overlay: click a service floor".to_owned();
+                return;
+            };
+            let Some(source) = tool.connection_from else {
+                tool.connection_from = Some(target);
+                tool.feedback = format!(
+                    "Source: {} #{} — now click a destination floor",
+                    prototype
+                        .simulation
+                        .service(target)
+                        .map_or("Service", |service| kind_name(service.kind())),
+                    target.value()
+                );
+                return;
+            };
+            match prototype.simulation.apply(GameCommand::ConnectServices {
+                from: source,
+                to: target,
+            }) {
+                Ok(CommandOutcome::ServicesConnected { .. }) => {
+                    tool.feedback = format!(
+                        "Connected service #{} → #{}. Choose another source.",
+                        source.value(),
+                        target.value()
+                    );
+                    tool.connection_from = None;
+                }
+                Ok(_) => unreachable!("connect command returns a connection outcome"),
+                Err(error) => {
+                    tool.feedback = format!("Cannot connect: {error}");
+                }
             }
         }
     }
@@ -604,6 +658,51 @@ fn sync_3d_scene(
                 },
             ));
         }
+    }
+}
+
+fn draw_network_overlay(
+    mut gizmos: Gizmos,
+    prototype: Res<PrototypeSimulation>,
+    tool: Res<PrototypeBuildTool>,
+    floors: Query<&Floor3d>,
+) {
+    if tool.action != PrototypeBuildAction::Connect {
+        return;
+    }
+    let center = |id| {
+        floors
+            .iter()
+            .find(|floor| floor.service == id)
+            .map(|floor| (floor.bounds.min + floor.bounds.max) / 2.0)
+    };
+    for link in prototype.simulation.network().links() {
+        let (Some(from), Some(to)) = (center(link.from), center(link.to)) else {
+            continue;
+        };
+        let lift = 0.7 + from.distance(to) * 0.08;
+        let midpoint = (from + to) / 2.0 + Vec3::Y * lift;
+        let color = Color::srgb(0.12, 0.82, 1.0);
+        gizmos.line(from, midpoint, color);
+        gizmos.line(midpoint, to, color);
+    }
+    if let Some(source) = tool.connection_from.and_then(center) {
+        let color = Color::srgb(1.0, 0.78, 0.15);
+        gizmos.line(
+            source + Vec3::new(-0.35, 0.0, 0.0),
+            source + Vec3::new(0.35, 0.0, 0.0),
+            color,
+        );
+        gizmos.line(
+            source + Vec3::new(0.0, -0.1, 0.0),
+            source + Vec3::new(0.0, 0.6, 0.0),
+            color,
+        );
+        gizmos.line(
+            source + Vec3::new(0.0, 0.0, -0.35),
+            source + Vec3::new(0.0, 0.0, 0.35),
+            color,
+        );
     }
 }
 
@@ -703,7 +802,7 @@ fn update_prototype_status(
 ) {
     **feedback = Text::new(tool.feedback.clone());
     let Some(service) = selected.0.and_then(|id| prototype.simulation.service(id)) else {
-        **status = Text::new("FLOOR INSPECTOR\n\nClick a building floor");
+        **status = Text::new("ARCHITECTURE\n\nRight-click a building floor");
         return;
     };
     let upgrade = service.next_tier().map_or_else(
@@ -716,16 +815,65 @@ fn update_prototype_status(
             )
         },
     );
+    let architecture = building_architecture_text(&prototype.simulation, service.id());
     **status = Text::new(format!(
-        "FLOOR INSPECTOR\n\n{}\nTier       {}\nState      {}\nCapacity   {}\nRun cost   {}/tick\n\nUPGRADE\n{}\n\nCredits    {}",
+        "FLOOR INSPECTOR\n\n{}\nTier       {}\nState      {}\nCapacity   {}\nRun cost   {}/tick\n\nUPGRADE\n{}\n\n{}\n\nCredits    {}",
         kind_name(service.kind()),
         service.tier(),
         service.state(),
         service.kind().traffic_capacity_at(service.tier()),
         service.kind().operating_cost_at(service.tier()),
         upgrade,
+        architecture,
         prototype.simulation.budget().credits(),
     ));
+}
+
+fn building_architecture_text(simulation: &Simulation, selected: ServiceId) -> String {
+    let Some(solution_id) = simulation
+        .service(selected)
+        .and_then(|service| service.solution())
+    else {
+        return "ARCHITECTURE\nStandalone service".to_owned();
+    };
+    let Some(solution) = simulation.solution(solution_id) else {
+        return "ARCHITECTURE\nUnknown building".to_owned();
+    };
+    let floors = solution
+        .services()
+        .iter()
+        .enumerate()
+        .filter_map(|(floor, id)| {
+            simulation.service(*id).map(|service| {
+                let marker = if *id == selected { ">" } else { " " };
+                format!(
+                    "{marker} F{}  {} {}",
+                    floor + 1,
+                    kind_name(service.kind()),
+                    service.tier().short_label()
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let links = simulation
+        .network()
+        .links()
+        .iter()
+        .filter(|link| {
+            solution.services().contains(&link.from) && solution.services().contains(&link.to)
+        })
+        .map(|link| format!("#{} → #{}", link.from.value(), link.to.value()))
+        .collect::<Vec<_>>();
+    format!(
+        "ARCHITECTURE — BUILDING #{}\n{}\n\nINTERNAL LINKS\n{}",
+        solution_id.value(),
+        floors.join("\n"),
+        if links.is_empty() {
+            "None".to_owned()
+        } else {
+            links.join("\n")
+        }
+    )
 }
 
 fn ray_ground_intersection(origin: Vec3, direction: Vec3) -> Option<Vec3> {
@@ -970,6 +1118,7 @@ mod tests {
         let mut tool = PrototypeBuildTool {
             action: PrototypeBuildAction::Foundation(FoundationKind::SmallLot),
             feedback: String::new(),
+            connection_from: None,
         };
         for foundation in [
             FoundationKind::SmallLot,
@@ -988,5 +1137,50 @@ mod tests {
             FoundationKind::TowerLot.footprint().width()
                 < FoundationKind::MegatowerLot.footprint().width()
         );
+    }
+
+    #[test]
+    fn connection_mode_and_architecture_panel_expose_links_on_demand() {
+        let mut simulation = prototype_simulation();
+        let CommandOutcome::SolutionBuilt { id: solution, .. } = simulation
+            .apply(GameCommand::BuildSolution {
+                foundation: FoundationKind::SmallLot,
+                position: GridPosition::new(1, 1),
+            })
+            .expect("test lot is valid")
+        else {
+            panic!("foundation command must return a solution")
+        };
+        let mut ids = Vec::new();
+        for kind in [ServiceKind::InternetGateway, ServiceKind::Firewall] {
+            let CommandOutcome::ServiceInstalled { id, .. } = simulation
+                .apply(GameCommand::InstallService { solution, kind })
+                .expect("test service fits")
+            else {
+                panic!("install command must return a service")
+            };
+            ids.push(id);
+        }
+        simulation
+            .apply(GameCommand::ConnectServices {
+                from: ids[0],
+                to: ids[1],
+            })
+            .expect("test connection is valid");
+
+        let architecture = building_architecture_text(&simulation, ids[0]);
+        assert!(architecture.contains("ARCHITECTURE — BUILDING #1"));
+        assert!(architecture.contains("F1  Internet Gateway"));
+        assert!(architecture.contains("#1 → #2"));
+
+        let mut tool = PrototypeBuildTool {
+            action: PrototypeBuildAction::Service(ServiceKind::Firewall),
+            feedback: String::new(),
+            connection_from: Some(ids[0]),
+        };
+        select_build_action(&mut tool, PrototypeBuildAction::Connect);
+        assert_eq!(tool.action, PrototypeBuildAction::Connect);
+        assert_eq!(tool.connection_from, None);
+        assert!(tool.feedback.contains("NETWORK OVERLAY"));
     }
 }
